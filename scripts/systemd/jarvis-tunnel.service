@@ -1,11 +1,14 @@
 [Unit]
-Description=Jarvis SOCKS-туннель на VPS point (Edge TTS, YouTube — с asus напрямую не открываются)
+Description=Jarvis туннель на VPS point: SOCKS наружу (Edge TTS, YouTube) и веб-интерфейс внутрь
 After=network-online.target
 
 [Service]
 Type=simple
 # Ключ asus на point ограничен в authorized_keys: только проброс портов, без шелла.
-ExecStart=/usr/bin/ssh -N -D 127.0.0.1:1080 \
+# -D: SOCKS на asus → выход в интернет через point (Edge TTS, YouTube).
+# -R: ядро Jarvis видно на point как 127.0.0.1:18000 — туда проксирует Caddy
+#     (https://point.abrdns.com:8446/). Порт только на loopback point.
+ExecStart=/usr/bin/ssh -N -D 127.0.0.1:1080 -R 127.0.0.1:18000:127.0.0.1:8000 \
     -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
     -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     root@2.26.88.227

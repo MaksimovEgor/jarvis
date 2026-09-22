@@ -9,15 +9,16 @@ export interface ChatReply {
 // разговор: начал голосом дома, продолжил с телефона.
 const SESSION_ID = 'default'
 
+// Пути относительные — не завязаны на то, где смонтирован фронт.
 export async function sendAudio(blob: Blob): Promise<ChatReply> {
   const form = new FormData()
   form.append('file', blob, `command.${extensionFor(blob.type)}`)
-  const resp = await fetch(`/chat/audio?session_id=${SESSION_ID}`, { method: 'POST', body: form })
+  const resp = await fetch(`chat/audio?session_id=${SESSION_ID}`, { method: 'POST', body: form })
   return parse(resp)
 }
 
 export async function sendText(text: string, speak: boolean): Promise<ChatReply> {
-  const resp = await fetch('/chat/text', {
+  const resp = await fetch('chat/text', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: SESSION_ID, text, speak }),
