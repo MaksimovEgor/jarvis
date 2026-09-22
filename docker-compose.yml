@@ -1,0 +1,11 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: jarvis-searxng
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./docker/searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8080/
+    restart: unless-stopped

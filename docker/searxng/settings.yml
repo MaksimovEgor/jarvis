@@ -1,0 +1,15 @@
+use_default_settings: true
+
+general:
+  instance_name: "jarvis-searxng"
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  # Замени на случайную строку перед первым запуском: openssl rand -hex 16
+  secret_key: "CHANGE_ME_RANDOM_STRING"
+  limiter: false
+  image_proxy: false

@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+httpx
+python-multipart
+beautifulsoup4
+faster-whisper
+piper-tts
+yt-dlp
+openwakeword
+numpy
+edge-tts
+aiohttp-socks
