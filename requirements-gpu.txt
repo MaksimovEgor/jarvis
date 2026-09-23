@@ -1,0 +1,7 @@
+# Только для машины с NVIDIA (asus, GTX 1050 — Pascal): ставит deploy.sh
+# поверх requirements.txt. Сборка под CUDA 12 и cuDNN 9.5 — CUDA 13 и cuDNN
+# новее 9.5 архитектуру Pascal не поддерживают («architectural feature absent»,
+# CUDNN_STATUS_EXECUTION_FAILED). Нужна Whisper в ядре (STT_DEVICE=cuda);
+# Vosk в jarvis-tts нарочно на CPU (на этой карте он медленнее).
+onnxruntime-gpu[cuda,cudnn]==1.24.1
+nvidia-cudnn-cu12==9.5.1.17

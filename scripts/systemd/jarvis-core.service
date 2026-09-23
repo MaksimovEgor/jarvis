@@ -1,6 +1,8 @@
 [Unit]
 Description=Jarvis core (FastAPI: STT → agent → TTS)
-After=network-online.target
+After=network-online.target jarvis-tts.service
+# Голос Vosk — в jarvis-tts; без него ядро говорит Piper'ом.
+Wants=jarvis-tts.service
 
 [Service]
 Type=simple

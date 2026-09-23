@@ -53,6 +53,11 @@ _PLAY = re.compile(rf"^{_PLAY_VERB}{_POLITE}\s+(.+?)(?:\s+(?:на|с|из)\s+(?:
 
 # «включи свет», «поставь будильник» — не музыка, пусть решает Hermes.
 _NOT_MEDIA = re.compile(r"^(?:свет|лампу|телевизор|будильник|таймер|напоминани\w*|кондиционер|чайник|отопление)\b")
+# Несколько просьб в одной фразе («включи Кино и сделай погромче, а потом
+# таймер») — не название песни: целиком в Hermes, он разберёт по частям.
+_COMPOUND = re.compile(
+    r"\b(?:а\s+потом|потом|затем|и\s+(?:сделай|поставь|включи|выключи|напомни|скажи|найди|запусти))\b"
+)
 # «последний/новый выпуск» — нужен свежий ролик канала, это умеет Hermes.
 _NEEDS_AGENT = re.compile(r"\b(?:последн\w*|нов\w*|свеж\w*|сегодняшн\w*|вчерашн\w*)\b")
 
@@ -119,6 +124,8 @@ async def try_fast(text: str, device: str) -> FastReply | None:
 
 async def _try_fast(text: str, device: str) -> FastReply | None:
     t = _normalize(text)
+    if _COMPOUND.search(t):
+        return None
     player = devices.player_for(device)
 
     if _PAUSE.match(t):

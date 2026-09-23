@@ -29,6 +29,15 @@ if [ -z "\$SKIP_PIP" ]; then
   python3 -m venv .venv
   .venv/bin/pip install -q -U pip
   .venv/bin/pip install -q -r requirements.txt
+  # openwakeword, vosk-tts, faster-whisper тянут onnxruntime (CPU); он и
+  # onnxruntime-gpu делят один модуль — CPU-сборка поверх ломает Whisper на
+  # видеокарте. На машине с NVIDIA ставим GPU-сборку поверх (--force-reinstall:
+  # удаление onnxruntime стирает и общие файлы модуля).
+  if nvidia-smi >/dev/null 2>&1; then
+    .venv/bin/pip uninstall -y -q onnxruntime 2>/dev/null || true
+    .venv/bin/pip install -q -r requirements-gpu.txt
+    .venv/bin/pip install -q --force-reinstall --no-deps "onnxruntime-gpu==1.24.1"
+  fi
 fi
 mkdir -p data/models/piper data/music
 [ -f .env ] || cp .env.example .env
@@ -36,6 +45,7 @@ mkdir -p data/models/piper data/music
 mkdir -p ~/.config/systemd/user
 cp scripts/systemd/*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
+
 echo "Перезапуск ядра (ждёт окончания ходов)…"
 systemctl --user restart jarvis-core
 for _ in \$(seq 1 60); do
@@ -43,4 +53,15 @@ for _ in \$(seq 1 60); do
   sleep 2
 done
 curl -sf http://127.0.0.1:8000/health >/dev/null && echo "Ядро работает." || { echo "Ядро не поднялось: journalctl --user -u jarvis-core"; exit 1; }
+
+# jarvis-tts держит модель Vosk (~60 с загрузки) — перезапускаем, только если
+# изменился его код или юнит; ядро тем временем говорит Piper'ом. После ядра:
+# старое ядро само держало копию модели, две копии сразу — лишние ~ГБ памяти.
+systemctl --user enable -q jarvis-tts
+TTS_HASH=\$(cat app/tts_server.py scripts/systemd/jarvis-tts.service | sha256sum)
+if [ "\$TTS_HASH" != "\$(cat ~/.cache/jarvis-tts.sha 2>/dev/null)" ] || ! systemctl --user is-active -q jarvis-tts; then
+  echo "Перезапуск jarvis-tts (модель грузится ~60 с)…"
+  systemctl --user restart jarvis-tts
+  mkdir -p ~/.cache && echo "\$TTS_HASH" > ~/.cache/jarvis-tts.sha
+fi
 EOS

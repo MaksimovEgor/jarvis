@@ -1,9 +1,10 @@
 """TTS: основной движок — Vosk-TTS (нейросетевой русский голос, onnx,
 локально на asus), запасные — Edge TTS (Microsoft через туннель) и Piper.
 
-Vosk: модель (~750 МБ) грузится один раз при старте ядра (warmup), синтез —
-в отдельном потоке (CPU-работа не должна вешать event loop), по одному
-куску за раз: onnx и так занимает все ядра.
+Vosk: модель (~750 МБ) живёт в отдельном постоянном процессе jarvis-tts
+(app/tts_server.py): её загрузка держала GIL, и ядро после каждого
+перезапуска минуту не отвечало. Ядро шлёт туда подготовленный текст и
+получает wav; сервис не отвечает (грузится, упал) — Piper.
 
 Edge отдаёт русские голоса не на все IP (с asus напрямую — пусто), поэтому
 ходит через SOCKS-туннель на VPS (`scripts/systemd/jarvis-tunnel.service`,
@@ -34,9 +35,10 @@ import tempfile
 import unicodedata
 import wave
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 import edge_tts
+import httpx
 from aiohttp_socks import ProxyConnector
 
 from app.config import settings
@@ -122,28 +124,21 @@ async def _chunked(
     return out_path
 
 
-_vosk: Any = None
-_vosk_lock = asyncio.Lock()
-
-
-def _load_vosk() -> Any:
-    global _vosk
-    if _vosk is None:
-        from vosk_tts import Model, Synth  # тяжёлый импорт — только если нужен
-
-        _vosk = Synth(Model(model_path=settings.vosk_tts_model_path))
-    return _vosk
+# Соединение — сразу отказ, если jarvis-tts ещё грузит модель; синтез куска
+# в 350 символов — секунды, но в очереди сервиса может стоять и чужой.
+_VOSK_TIMEOUT = httpx.Timeout(60.0, connect=2.0)
 
 
 async def warmup() -> None:
-    """Загрузить модель при старте, а не на первой фразе (~10 с)."""
-    if settings.tts_engine == "vosk":
-        try:
-            async with _vosk_lock:
-                await asyncio.to_thread(_load_vosk)
-            logger.info("Vosk TTS загружен")
-        except Exception:
-            logger.exception("Vosk TTS не загрузился — будет Piper")
+    """Сказать в журнал, готов ли jarvis-tts: без него голос будет Piper'ом."""
+    if settings.tts_engine != "vosk":
+        return
+    try:
+        async with httpx.AsyncClient(timeout=_VOSK_TIMEOUT) as client:
+            (await client.get(f"{settings.vosk_tts_url}/health")).raise_for_status()
+        logger.info("jarvis-tts на связи")
+    except httpx.HTTPError as exc:
+        logger.warning("jarvis-tts недоступен (%s) — пока он не поднимется, голос Piper'ом", exc)
 
 
 async def _synthesize_vosk(text: str, out_path: Path) -> Path:
@@ -151,12 +146,11 @@ async def _synthesize_vosk(text: str, out_path: Path) -> Path:
     text = speakable(text)
     if not any(ch.isalnum() for ch in text):
         return _silence(out_path)
-    async with _vosk_lock:
-        synth = await asyncio.to_thread(_load_vosk)
-        await asyncio.to_thread(
-            synth.synth, text, str(out_path),
-            speaker_id=settings.vosk_tts_speaker, speech_rate=settings.vosk_tts_rate,
-        )
+    payload = {"text": text, "speaker": settings.vosk_tts_speaker, "rate": settings.vosk_tts_rate}
+    async with httpx.AsyncClient(timeout=_VOSK_TIMEOUT) as client:
+        resp = await client.post(f"{settings.vosk_tts_url}/synth", json=payload)
+        resp.raise_for_status()
+    out_path.write_bytes(resp.content)
     return out_path
 
 

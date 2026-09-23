@@ -45,6 +45,8 @@ _mcp_app = mcp.streamable_http_app()
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     timers.start()
     asyncio.create_task(tts.warmup())
+    # Whisper medium на GPU грузится ~10 с — не на первой голосовой команде.
+    asyncio.create_task(stt.warmup())
     async with _mcp_app.router.lifespan_context(_mcp_app):
         yield
 

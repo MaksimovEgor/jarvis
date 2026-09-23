@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # SOCKS-туннель — нестабилен), Piper — запасной, всегда локально.
     tts_engine: Literal["vosk", "edge", "piper"] = "piper"
     vosk_tts_model_path: str = "data/models/vosk-tts/vosk-model-tts-ru-0.9-multi"
+    # Постоянный процесс с моделью (app/tts_server.py, jarvis-tts.service).
+    vosk_tts_url: str = "http://127.0.0.1:8001"
     vosk_tts_speaker: int = 0
     vosk_tts_rate: float = 1.0  # speech_rate модели: >1 — быстрее
     edge_tts_voice: str = "ru-RU-DmitryNeural"

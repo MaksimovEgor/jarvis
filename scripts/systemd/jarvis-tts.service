@@ -1,0 +1,14 @@
+[Unit]
+Description=Jarvis TTS (Vosk: модель в памяти постоянно, ядро перезапускается без её перезагрузки)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/jarvis
+# Только loopback: синтез нужен лишь ядру на этой же машине.
+ExecStart=%h/jarvis/.venv/bin/uvicorn app.tts_server:app --host 127.0.0.1 --port 8001 --timeout-graceful-shutdown 5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
