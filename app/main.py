@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64
+import asyncio
 import logging
 import os
 import tempfile
@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from os import PathLike
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -22,8 +22,9 @@ from app.agent.orchestrator import run_agent
 from app.config import settings
 from app.mcp_server import mcp
 from app.music import devices, media, web_player
-from app.schemas import AudioChatResponse, CancelRequest, ClientLog, TextChatRequest, TextChatResponse
-from app.services import stt, tts
+from app.schemas import AudioChatResponse, AudioMore, CancelRequest, ClientLog, TextChatRequest, TextChatResponse
+from app.services import speech, stt, tts
+from app.services.speech import Spoken
 from app.services.hermes import run_hermes
 from app.timers import timers
 from app.turns import turns
@@ -40,6 +41,7 @@ _mcp_app = mcp.streamable_http_app()
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     timers.start()
+    asyncio.create_task(tts.warmup())
     async with _mcp_app.router.lifespan_context(_mcp_app):
         yield
 
@@ -86,7 +88,7 @@ def _device(device: str) -> str:
     return device
 
 
-async def _stop_everything(session_id: str, device: str, speak: bool) -> tuple[str, list[str], str | None]:
+async def _stop_everything(session_id: str, device: str, speak: bool) -> tuple[str, list[str], Spoken | None]:
     """«Стоп» как у Алисы — мгновенно и без Hermes: отменить всё, что
     выполняется, и поставить музыку на паузу."""
     turns.cancel(session_id)
@@ -96,7 +98,7 @@ async def _stop_everything(session_id: str, device: str, speak: bool) -> tuple[s
 
 async def _answer(
     session_id: str, text: str, device: str, speak: bool, progress: Callable[[str], None],
-) -> tuple[str, list[str], str | None]:
+) -> tuple[str, list[str], Spoken | None]:
     """Весь ход целиком — и ответ, и его озвучка: «стоп» должен отменять и
     синтез длинного ответа, иначе он прозвучит уже после «стопа».
     Простые команды («включи…», «пауза», «таймер на…») — быстрым путём без Hermes."""
@@ -115,7 +117,7 @@ async def _answer(
 
 async def _run_turn(
     turn_id: str | None, session_id: str, device: str, text: str, speak: bool,
-) -> tuple[str, list[str], str | None] | None:
+) -> tuple[str, list[str], Spoken | None] | None:
     result = await turns.run(
         turn_id or uuid.uuid4().hex, session_id, device, text,
         lambda progress: _answer(session_id, text, device, speak, progress),
@@ -134,14 +136,14 @@ async def health() -> dict:
 async def chat_text(req: TextChatRequest) -> TextChatResponse:
     device = _device(req.device)
     if conflicts.is_just_stop(req.text):
-        reply, tool_calls, audio_b64 = await _stop_everything(req.session_id, device, req.speak)
+        reply, tool_calls, spoken = await _stop_everything(req.session_id, device, req.speak)
         history.append(req.session_id, req.text, reply, tool_calls)
-        return TextChatResponse(reply=reply, tool_calls=tool_calls, audio_base64=audio_b64)
+        return TextChatResponse(reply=reply, tool_calls=tool_calls, **_audio(spoken))
     result = await _run_turn(req.turn_id, req.session_id, device, req.text, req.speak)
     if result is None:
         return TextChatResponse(reply="", cancelled=True)
-    reply, tool_calls, audio_b64 = result
-    return TextChatResponse(reply=reply, tool_calls=tool_calls, audio_base64=audio_b64)
+    reply, tool_calls, spoken = result
+    return TextChatResponse(reply=reply, tool_calls=tool_calls, **_audio(spoken))
 
 
 @app.post("/chat/cancel")
@@ -167,17 +169,17 @@ async def chat_audio(
     logger.info("STT: %s", transcript)
     if not transcript.strip():
         # Тишина/шум — в Hermes не отправляем (пустой ввод даёт 500).
-        return AudioChatResponse(transcript="", reply="Не расслышал.", tool_calls=[], audio_base64=await _speak("Не расслышал."))
+        return AudioChatResponse(transcript="", reply="Не расслышал.", tool_calls=[], **_audio(await _speak("Не расслышал.")))
 
     if conflicts.is_just_stop(transcript):
-        reply, tool_calls, audio_b64 = await _stop_everything(session_id, device, True)
+        reply, tool_calls, spoken = await _stop_everything(session_id, device, True)
         history.append(session_id, transcript, reply, tool_calls)
-        return AudioChatResponse(transcript=transcript, reply=reply, tool_calls=tool_calls, audio_base64=audio_b64)
+        return AudioChatResponse(transcript=transcript, reply=reply, tool_calls=tool_calls, **_audio(spoken))
     result = await _run_turn(turn_id, session_id, device, transcript, True)
     if result is None:
         return AudioChatResponse(transcript=transcript, reply="", cancelled=True)
-    reply, tool_calls, audio_b64 = result
-    return AudioChatResponse(transcript=transcript, reply=reply, tool_calls=tool_calls, audio_base64=audio_b64)
+    reply, tool_calls, spoken = result
+    return AudioChatResponse(transcript=transcript, reply=reply, tool_calls=tool_calls, **_audio(spoken))
 
 
 @app.post("/client/log")
@@ -205,10 +207,25 @@ async def music_state(device: str = devices.ASUS) -> dict:
     return await devices.player_for(_device(device)).state()
 
 
-async def _speak(text: str) -> str:
-    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_out:
-        await tts.synthesize(text, Path(tmp_out.name))
-        return base64.b64encode(Path(tmp_out.name).read_bytes()).decode()
+async def _speak(text: str) -> Spoken:
+    # Длинное — первый кусок сразу, остальные клиент заберёт из /tts/chunk.
+    return await speech.speak(text)
+
+
+def _audio(spoken: Spoken | None) -> dict[str, Any]:
+    """Поля озвучки для ответа /chat/*."""
+    if spoken is None:
+        return {"audio_base64": None}
+    more = AudioMore(id=spoken.job_id, count=spoken.count) if spoken.job_id else None
+    return {"audio_base64": spoken.audio_base64, "audio_more": more}
+
+
+@app.get("/tts/chunk/{job_id}/{n}")
+async def tts_chunk(job_id: str, n: int) -> Response:
+    try:
+        return Response(await speech.chunk(job_id, n), media_type="audio/wav")
+    except KeyError:
+        raise HTTPException(404, "нет такого куска озвучки")
 
 
 # Веб-интерфейс (web/, собирается `npm run build`). Монтируется последним,

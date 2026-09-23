@@ -22,11 +22,12 @@ from typing import Awaitable, Callable
 
 from app.agent import conflicts
 from app.music import devices
+from app.services.speech import Spoken
 
 logger = logging.getLogger("jarvis.turns")
 
-# (ответ, инструменты, озвучка base64 | None)
-Answer = tuple[str, list[str], str | None]
+# (ответ, инструменты, озвучка | None)
+Answer = tuple[str, list[str], Spoken | None]
 Progress = Callable[[str], None]
 
 

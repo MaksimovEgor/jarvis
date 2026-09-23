@@ -33,9 +33,12 @@ class Settings(BaseSettings):
     stt_compute_type: str = "int8"
     stt_language: str = "ru"
 
-    # TTS — Edge (нейроголоса Microsoft) через SOCKS-туннель на VPS, Piper —
-    # локальный запасной вариант (и основной при TTS_ENGINE=piper).
-    tts_engine: Literal["edge", "piper"] = "piper"
+    # TTS — Vosk (нейроголос локально на asus, основной), Edge (Microsoft через
+    # SOCKS-туннель — нестабилен), Piper — запасной, всегда локально.
+    tts_engine: Literal["vosk", "edge", "piper"] = "piper"
+    vosk_tts_model_path: str = "data/models/vosk-tts/vosk-model-tts-ru-0.9-multi"
+    vosk_tts_speaker: int = 0
+    vosk_tts_rate: float = 1.0  # speech_rate модели: >1 — быстрее
     edge_tts_voice: str = "ru-RU-DmitryNeural"
     edge_tts_rate: str = "+0%"
     edge_tts_pitch: str = "+0Hz"

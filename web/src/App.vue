@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import { cancelTurn, fetchHistory, sendAudio, sendText, type ChatReply } from './api'
+import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, type ChatReply, type SpeechMore } from './api'
 import ChatLog from './components/ChatLog.vue'
 import PlayerBar from './components/PlayerBar.vue'
 import TalkButton from './components/TalkButton.vue'
@@ -104,14 +104,17 @@ document.addEventListener('visibilitychange', syncWake)
 
 interface Speech {
   audio: string
+  more?: SpeechMore | null
   done: () => void
 }
 const speechQueue: Speech[] = []
 let draining = false
+// Меняется при каждом «перебили» — недоигранный длинный ответ это видит.
+let speechGeneration = 0
 
-function speak(audio: string): Promise<void> {
+function speak(audio: string, more?: SpeechMore | null): Promise<void> {
   return new Promise((done) => {
-    speechQueue.push({ audio, done })
+    speechQueue.push({ audio, more, done })
     void drainSpeech()
   })
 }
@@ -121,14 +124,36 @@ async function drainSpeech(): Promise<void> {
   draining = true
   while (speechQueue.length && !recorder.isRecording.value) {
     const next = speechQueue.shift()!
-    await player.play(next.audio)
+    await playSpeech(next)
     next.done()
   }
   draining = false
 }
 
+// Длинный ответ: первый кусок сразу, следующий качается, пока звучит текущий.
+async function playSpeech({ audio, more }: Speech): Promise<void> {
+  const generation = speechGeneration
+  let upcoming = more && more.count > 1 ? fetchSpeechChunk(more.id, 1) : null
+  await player.play(audio)
+  for (let n = 1; more && upcoming && n < more.count; n++) {
+    if (generation !== speechGeneration) return
+    let blob: Blob
+    try {
+      blob = await upcoming
+    } catch {
+      return
+    }
+    upcoming = n + 1 < more.count ? fetchSpeechChunk(more.id, n + 1) : null
+    if (generation !== speechGeneration) return
+    const url = URL.createObjectURL(blob)
+    await player.playUrl(url)
+    URL.revokeObjectURL(url)
+  }
+}
+
 // Пользователь заговорил — Джарвис замолкает, недосказанное не досказывает.
 function interrupt(): void {
+  speechGeneration += 1
   for (const s of speechQueue.splice(0)) s.done()
   player.stop()
 }
@@ -223,7 +248,7 @@ async function ask(request: (turnId: string) => Promise<ChatReply>, text: string
     push('assistant', res.reply, res.tool_calls)
     if (res.audio_base64) {
       pending.value -= 1
-      await speak(res.audio_base64)
+      await speak(res.audio_base64, res.audio_more)
       pending.value += 1
     }
   } catch (e) {

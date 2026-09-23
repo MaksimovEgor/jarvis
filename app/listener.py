@@ -128,9 +128,22 @@ async def _handle_command(frames: list[np.ndarray]) -> None:
     logger.info("Ответ: %s", data["reply"])
 
     if data.get("audio_base64"):
-        with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_out:
-            Path(tmp_out.name).write_bytes(base64.b64decode(data["audio_base64"]))
-            _play(Path(tmp_out.name))
+        _play_bytes(base64.b64decode(data["audio_base64"]))
+    # Длинный ответ ядро озвучивает кусками: первый пришёл в ответе, остальные
+    # забираем по одному — пока звучит кусок, ядро синтезирует следующий.
+    if more := data.get("audio_more"):
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            for n in range(1, more["count"]):
+                resp = await client.get(f"{CORE_URL}/tts/chunk/{more['id']}/{n}")
+                if resp.status_code != 200:
+                    break
+                _play_bytes(resp.content)
+
+
+def _play_bytes(wav: bytes) -> None:
+    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_out:
+        Path(tmp_out.name).write_bytes(wav)
+        _play(Path(tmp_out.name))
 
 
 async def main() -> None:

@@ -14,10 +14,17 @@ class TextChatRequest(BaseModel):
     turn_id: str | None = None
 
 
+class AudioMore(BaseModel):
+    """Длинный ответ: остальные куски озвучки — GET /tts/chunk/{id}/{n}, n=1..count-1."""
+    id: str
+    count: int
+
+
 class TextChatResponse(BaseModel):
     reply: str
     tool_calls: list[str] = []
     audio_base64: str | None = None
+    audio_more: AudioMore | None = None
     # Ход отменила более новая реплика («стоп», «нет, включи другое»).
     cancelled: bool = False
 
@@ -27,6 +34,7 @@ class AudioChatResponse(BaseModel):
     reply: str
     tool_calls: list[str] = []
     audio_base64: str | None = None
+    audio_more: AudioMore | None = None
     cancelled: bool = False
 
 

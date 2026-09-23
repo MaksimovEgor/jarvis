@@ -11,4 +11,5 @@ mcp>=2.2,<3
 openwakeword
 numpy
 edge-tts
+vosk-tts
 aiohttp-socks

@@ -5,7 +5,22 @@ export interface ChatReply {
   reply: string
   tool_calls: string[]
   audio_base64: string | null
+  // Длинный ответ: остальные куски озвучки забираются по одному (app/services/speech.py).
+  audio_more?: SpeechMore | null
   cancelled?: boolean
+}
+
+export interface SpeechMore {
+  id: string
+  count: number
+}
+
+export async function fetchSpeechChunk(id: string, n: number): Promise<Blob> {
+  const resp = await fetch(`tts/chunk/${id}/${n}`)
+  if (!resp.ok) {
+    throw new Error(`Сервер ответил ${resp.status}`)
+  }
+  return resp.blob()
 }
 
 // Один session_id с голосовым listener'ом → в Hermes это один и тот же
