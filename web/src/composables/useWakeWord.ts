@@ -8,8 +8,12 @@ const ENABLED_KEY = 'jarvis:wake'
 const WAKE = /(джарвис|джервис|жарвис|джарвиз|джарвес|jarvis)[\s,.!?:;—-]*/i
 // iOS заканчивает сессию распознавания сам (тишина, ~минута) — перезапуск.
 const RESTART_MS = 300
-// Слово услышали, а фраза так и не закончилась — отпускаем через столько.
-const ALERT_TIMEOUT_MS = 8000
+// После «Джарвис» команда собирается, пока человек говорит: закончилась,
+// когда распознаватель молчит столько. Раньше брали первый «final» — а iOS
+// ставит его на первой же паузе, и уходил обрывок («включи…»).
+const COMMAND_PAUSE_MS = 1800
+// Страховка: столько после «Джарвис» — команда точно закончилась.
+const MAX_COMMAND_MS = 30000
 
 export interface WakeHandlers {
   onAlert: () => void // услышал «Джарвис» — сигнал, приглушить музыку
@@ -30,15 +34,35 @@ export function useWakeWord(handlers: WakeHandlers) {
 
   let rec: SpeechRecognitionLike | null = null
   let wanted = false
+  // Сбор команды после «Джарвис»: текст после слова и был ли он в последнем
+  // варианте распознавания (распознаватель может «передумать»).
   let alerted = false
-  let alertTimer: number | null = null
+  let command = ''
+  let heardWake = false
+  let pauseTimer: number | null = null
+  let maxTimer: number | null = null
 
   function clearAlert(): void {
     alerted = false
-    if (alertTimer !== null) {
-      clearTimeout(alertTimer)
-      alertTimer = null
+    command = ''
+    heardWake = false
+    for (const t of [pauseTimer, maxTimer]) if (t !== null) clearTimeout(t)
+    pauseTimer = maxTimer = null
+  }
+
+  // Пауза после «Джарвис …» — команда закончилась (или это была ложная тревога).
+  function finishCommand(): void {
+    if (!alerted) return
+    const text = command
+    const real = heardWake
+    clearAlert()
+    if (!real) {
+      handlers.onCancel()
+      return
     }
+    clientLog(`wake: command "${text.slice(0, 80)}"`)
+    pause()
+    handlers.onWake(text)
   }
 
   function begin(): void {
@@ -55,29 +79,23 @@ export function useWakeWord(handlers: WakeHandlers) {
       blocked.value = false
     }
     r.onresult = (e) => {
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const result = e.results[i]
-        const text = result[0].transcript
-        const match = WAKE.exec(text)
-        clientLog(`wake: result ${result.isFinal ? 'final' : 'interim'} "${text.slice(0, 80)}" match=${Boolean(match)}`)
-        if (match && !alerted) {
-          alerted = true
-          handlers.onAlert()
-          alertTimer = window.setTimeout(() => {
-            clearAlert()
-            handlers.onCancel()
-          }, ALERT_TIMEOUT_MS)
-        }
-        if (!result.isFinal || !alerted) continue
-        clearAlert()
-        if (match) {
-          pause()
-          handlers.onWake(text.slice(match.index + match[0].length).trim())
-        } else {
-          handlers.onCancel()
-        }
-        return
+      // Весь текст сессии: финальные куски + текущий промежуточный — команда
+      // после «Джарвис» может растянуться на несколько «final».
+      let full = ''
+      for (let i = 0; i < e.results.length; i++) full += ` ${e.results[i][0].transcript}`
+      // Последнее «Джарвис» в тексте — команда после него.
+      const matches = [...full.matchAll(new RegExp(WAKE.source, 'gi'))]
+      const last = matches[matches.length - 1]
+      if (!last && !alerted) return
+      if (last && !alerted) {
+        alerted = true
+        handlers.onAlert()
+        maxTimer = window.setTimeout(finishCommand, MAX_COMMAND_MS)
       }
+      heardWake = Boolean(last)
+      if (last) command = full.slice((last.index ?? 0) + last[0].length).trim()
+      if (pauseTimer !== null) clearTimeout(pauseTimer)
+      pauseTimer = window.setTimeout(finishCommand, COMMAND_PAUSE_MS)
     }
     r.onerror = (e) => {
       clientLog(`wake: onerror ${e.error}`)
@@ -87,6 +105,8 @@ export function useWakeWord(handlers: WakeHandlers) {
     }
     r.onend = () => {
       clientLog(`wake: onend wanted=${wanted} blocked=${blocked.value}`)
+      // iOS закрыл сессию посреди команды — дальше текст не придёт, берём что есть.
+      if (alerted) finishCommand()
       listening.value = false
       if (rec === r) rec = null
       if (wanted && !blocked.value) window.setTimeout(begin, RESTART_MS)
