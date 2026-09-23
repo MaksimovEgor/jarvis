@@ -60,7 +60,7 @@
 - **core** — сам FastAPI-процесс, нативно в venv (не в Docker — проще
   доступ к ALSA для mpv/piper, когда дойдёт до живого звука).
 - **searxng** — в Docker (`docker-compose.yml`), self-host поиск, без ключей.
-- **mpv** — поднимается лениво самим инструментом `music`, играет в реальное
+- **mpv** — поднимается лениво плеером (app/music/player.py), играет в реальное
   аудиоустройство ноутбука.
 
 ## Статус — что уже готово
@@ -108,6 +108,44 @@
    Логи: `journalctl --user -u jarvis-listener -f` (или `-u jarvis-core`).
    Ядро слушает только `127.0.0.1:8000`.
 7. Проверить текстом без микрофона: `ssh asus 'cd jarvis && .venv/bin/python scripts/test_chat.py http://127.0.0.1:8000'`.
+
+## Музыка (app/music/)
+
+```
+Hermes ──MCP /mcp (streamable HTTP)─┐
+builtin-агент (tools/music.py) ─────┼─► player.py ── единственный владелец mpv
+listener ──POST /music/duck|unduck ─┘     ├ очередь: трек + YouTube Mix (RD<id>, ~20 похожих)
+                                          ├ youtube.py: yt-dlp из .venv через YOUTUBE_PROXY
+                                          │   → data/music/cache (LRU, MUSIC_CACHE_MAX_MB)
+                                          └ radio.py: Radio Browser API (без ключа)
+```
+
+- mpv и aplay listener-а играют через **dmix** (`dmix:CARD=PCH,DEV=0`):
+  `plughw` эксклюзивен, и mpv даже на паузе давал aplay «device busy».
+- Wake word → `duck` (пауза), после ответа → `unduck`. Трек, включённый во
+  время команды, стартует после ответа. Страховка — автоматический unduck через 200 с.
+- Ссылку googlevideo mpv сам не откроет (ffmpeg без SOCKS), поэтому трек
+  сначала скачивается (~3 с), следующий в очереди качается заранее.
+- yt-dlp нужен JS-рантайм (иначе пропадает bestaudio): берётся node/deno из
+  PATH или `~/.local/bin`.
+- Hermes: `hermes mcp add jarvis --url http://127.0.0.1:8000/mcp` (уже
+  сделано). Инструменты у Hermes отложенные (tool_search), поэтому их имена и
+  сигнатуры перечислены в `VOICE_INSTRUCTIONS`, чтобы модель вызывала их сразу.
+  После рестарта jarvis-core Hermes получает 404 на старую MCP-сессию и сам
+  переподключается.
+- `/mcp` и `/music/*` отвечают только локальным клиентам: запросы с
+  `X-Forwarded-For` (через Caddy) получают 403.
+- Голосовой разговор с Hermes начинается заново после
+  `HERMES_CONVERSATION_IDLE_MINUTES` (10) минут тишины: бессрочная история
+  разрослась до ~370k токенов на реплику.
+
+## Таймеры и объявления (app/timers.py, app/services/speaker.py)
+
+MCP-инструменты `set_timer`, `remind`, `list_timers`, `cancel_timer`, `announce`.
+Срабатывание: пауза музыки → сигнал + фраза (TTS) через dmix, дважды → музыка
+продолжается. Хранятся в `data/timers.json`, после рестарта ядра
+восстанавливаются, пропущенные не старше часа объявляются сразу. Cron Hermes
+для этого не годится: доставка задачи из api_server зависает в pending.
 
 ## Дальше (не сделано, но архитектура заложена под это)
 

@@ -3,21 +3,53 @@ from __future__ import annotations
 import base64
 import logging
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, Request, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.agent.orchestrator import run_agent
 from app.config import settings
+from app.mcp_server import mcp
+from app.music.player import player
 from app.schemas import AudioChatResponse, TextChatRequest, TextChatResponse
 from app.services import stt, tts
 from app.services.hermes import run_hermes
+from app.timers import timers
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis.core")
 
-app = FastAPI(title="Jarvis")
+# MCP (streamable HTTP) встраивается прямо в ядро: плеер один на систему.
+# Его маршрут /mcp добавляется в роутер FastAPI, а менеджер сессий
+# запускается через lifespan — у смонтированного sub-app свой lifespan не вызывается.
+_mcp_app = mcp.streamable_http_app()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    timers.start()
+    async with _mcp_app.router.lifespan_context(_mcp_app):
+        yield
+
+
+app = FastAPI(title="Jarvis", lifespan=_lifespan)
+app.router.routes.extend(_mcp_app.routes)
+
+_LOCAL_ONLY = ("/mcp", "/music")
+
+
+@app.middleware("http")
+async def _local_only(request: Request, call_next):
+    """Ядро доступно снаружи через туннель и Caddy (basic auth), но плеер и
+    MCP — только для процессов на asus. Caddy всегда добавляет X-Forwarded-For,
+    а прямые локальные запросы его не несут."""
+    if request.url.path.startswith(_LOCAL_ONLY) and "x-forwarded-for" in request.headers:
+        return JSONResponse({"detail": "local only"}, status_code=403)
+    return await call_next(request)
 
 # In-memory по session_id — переживает процесс, не перезапуски. Для пилота
 # этого достаточно; персистентность истории не нужна раньше многопользовательского режима.
@@ -54,6 +86,24 @@ async def chat_audio(file: UploadFile, session_id: str = "default") -> AudioChat
     reply, tool_calls = await _answer(session_id, transcript)
     audio_b64 = await _speak(reply)
     return AudioChatResponse(transcript=transcript, reply=reply, tool_calls=tool_calls, audio_base64=audio_b64)
+
+
+@app.post("/music/duck")
+async def music_duck() -> dict:
+    """Listener: wake word — музыку на паузу до конца ответа."""
+    await player.duck()
+    return {"status": "ok"}
+
+
+@app.post("/music/unduck")
+async def music_unduck() -> dict:
+    await player.unduck()
+    return {"status": "ok"}
+
+
+@app.get("/music/state")
+async def music_state() -> dict:
+    return await player.state()
 
 
 async def _speak(text: str) -> str:

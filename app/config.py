@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     hermes_url: str = "http://127.0.0.1:8642"
     hermes_api_key: str = ""
     hermes_timeout: float = 120.0  # агентный ход с инструментами бывает долгим
+    # Столько минут тишины — и голосовой разговор начинается с чистой истории.
+    hermes_conversation_idle_minutes: int = 10
 
     # STT — faster-whisper локально на asus (2GB VRAM у GTX 1050 узковаты
     # для large, поэтому small/int8; CPU-фоллбек тоже тянет small в реальном
@@ -45,6 +47,17 @@ class Settings(BaseSettings):
     searxng_url: str = "http://127.0.0.1:8080"
     music_library_dir: str = "data/music"
     mpv_socket: str = "/tmp/jarvis-mpv.sock"
+
+    # Музыка. Играем через dmix, а не plughw: plughw эксклюзивен, и mpv даже
+    # на паузе не дал бы listener-у проиграть ответ (aplay → «device busy»).
+    audio_output_device: str = "dmix:CARD=PCH,DEV=0"
+    music_volume: int = 60
+    # YouTube с asus напрямую не открывается — и поиск, и скачивание идут
+    # через SOCKS-туннель (тот же, что у Edge TTS).
+    youtube_proxy: str = ""
+    music_cache_dir: str = "data/music/cache"
+    music_cache_max_mb: int = 2048
+    radio_browser_url: str = "https://de1.api.radio-browser.info"
 
     session_history_limit: int = 20
 

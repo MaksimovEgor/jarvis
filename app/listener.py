@@ -52,7 +52,11 @@ SILENCE_FRAMES_TO_STOP = 15  # ~1.2с тишины после речи оста�
 MAX_COMMAND_FRAMES = 150  # ~12с — защита от зависшей записи
 CORE_URL = "http://127.0.0.1:8000"
 
-ALSA_DEVICE = "plughw:0,0"
+ALSA_DEVICE = "plughw:0,0"  # запись: микрофон гарнитуры
+# Проигрывание — через dmix: так ответ звучит, даже когда mpv держит карту
+# (plughw эксклюзивен — aplay получал бы «device busy»). plug: — ресемплинг
+# под фиксированный формат dmix.
+PLAYBACK_DEVICE = 'plug:"dmix:CARD=PCH,DEV=0"'
 _CAPTURE_SOURCE_ITEM = 1  # 0=Internal Mic, 1=Headset Mic, 2=Internal Mic 1 (см. `amixer -c0 cget numid=6`)
 _CAPTURE_VOLUME = 35  # из 63 — микрофон гарнитуры клипует на максимуме, см. README
 
@@ -88,7 +92,17 @@ def _mic_frames():
 
 
 def _play(path: Path) -> None:
-    subprocess.run(["aplay", "-D", ALSA_DEVICE, "-q", str(path)], check=False)
+    subprocess.run(["aplay", "-D", PLAYBACK_DEVICE, "-q", str(path)], check=False)
+
+
+async def _music(action: str) -> None:
+    """Пауза музыки на время команды и возврат после ответа. Ошибка здесь не
+    должна мешать самой команде — у плеера есть страховочный таймер."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(f"{CORE_URL}/music/{action}")
+    except httpx.HTTPError as exc:
+        logger.warning("music/%s не прошёл: %s", action, exc)
 
 
 async def _handle_command(frames: list[np.ndarray]) -> None:
@@ -143,6 +157,7 @@ async def main() -> None:
                 logger.info("Почти wake word: score=%.2f", score)
             if score > WAKE_THRESHOLD:
                 logger.info("Сработал wake word — записываю команду…")
+                await _music("duck")
                 recording = []
                 heard_speech = False
                 silence_run = 0
@@ -164,11 +179,14 @@ async def main() -> None:
             wake_model.reset()
             if not heard_speech:
                 logger.info("Ложное срабатывание — команды не было, снова слушаю.")
+                await _music("unduck")
                 continue
             try:
                 await _handle_command(frames)
             except Exception:
                 logger.exception("Не получилось обработать команду")
+            finally:
+                await _music("unduck")
 
 
 if __name__ == "__main__":
