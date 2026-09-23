@@ -53,6 +53,10 @@ export function useMusic(
 
   const hasTrack = computed(() => title.value !== null)
 
+  function isVisible(): boolean {
+    return document.visibilityState === 'visible'
+  }
+
   function report(extra: Omit<PlayerReport, 'seq'> = {}): void {
     lastReport = Date.now()
     void playerReport({ seq, position: audio.currentTime || 0, ...extra })
@@ -132,7 +136,7 @@ export function useMusic(
       if (e.lastEventId) lastEventId = e.lastEventId
       onEvent(JSON.parse(e.data) as PlayerEvent)
     }
-    events.onopen = () => void playerReport({ seq, volume_supported: volumeSupported, hls })
+    events.onopen = () => void playerReport({ seq, volume_supported: volumeSupported, hls, visible: isVisible() })
     // Браузер переподключается сам, но после ответа 5xx (ядро рестартует)
     // сдаётся и закрывает канал — тогда пробуем снова сами.
     events.onerror = () => {
@@ -305,11 +309,13 @@ export function useMusic(
 
   // iOS рвёт SSE у свёрнутой вкладки; при возвращении — переподключаемся и
   // получаем свежий снимок. При сворачивании — сохранить позицию.
+  // Видимость — ядру: свёрнутой вкладке готовое уходит пушем.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
+    if (isVisible()) {
       if (!events || events.readyState === EventSource.CLOSED) connect()
-    } else if (hasTrack.value) {
-      report()
+      else void playerReport({ seq, visible: true })
+    } else {
+      void playerReport({ seq, position: audio.currentTime || 0, visible: false })
     }
   })
 

@@ -23,7 +23,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.music import devices, media
-from app.services import tts
+from app.services import tts, webpush
 
 logger = logging.getLogger("jarvis.speaker")
 
@@ -63,7 +63,10 @@ async def _play(path: Path) -> None:
 
 
 async def announce(text: str, device: str = devices.ASUS, chime: bool = True, repeat: int = 1) -> str:
-    """Возвращает устройство, на котором реально прозвучало."""
+    """Возвращает устройство, на котором реально прозвучало. Вкладка веба
+    свёрнута — вдобавок пуш: на экране блокировки видно, что сработало."""
+    if device != devices.ASUS and not devices.web_output(device).watching:
+        await webpush.notify(device, "Джарвис", text)
     if device != devices.ASUS and devices.web_output(device).connected:
         await _announce_web(text, device, chime, repeat)
         return device

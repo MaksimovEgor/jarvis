@@ -165,8 +165,15 @@ class WebOutput(Output):
         # События ходов с номерами — iOS рвёт SSE, пропущенное досылаем.
         self._log: deque[tuple[int, float, dict[str, Any]]] = deque(maxlen=200)
         self._event_id = 0
+        # Вкладка на экране (visibilitychange) — иначе готовое шлём пушем.
+        self._visible = True
 
     # --- связь с браузером ------------------------------------------------
+
+    @property
+    def watching(self) -> bool:
+        """Экран открыт и получает события — ответ увидят без пуша."""
+        return bool(self._subscribers) and self._visible
 
     @property
     def connected(self) -> bool:
@@ -189,6 +196,8 @@ class WebOutput(Output):
             queue.put_nowait(event)
         queue.put_nowait({"type": "turns", "active": active, "_id": f"{BOOT}:{self._event_id}"})
         self._subscribers.add(queue)
+        # Переподключается только открытая вкладка (useMusic, visibilitychange).
+        self._visible = True
         self._last_seen = time.time()
         return queue
 
@@ -224,6 +233,8 @@ class WebOutput(Output):
             self._volume_supported = bool(data["volume_supported"])
         if "hls" in data:
             self._hls = bool(data["hls"])
+        if data.get("visible") is not None:
+            self._visible = bool(data["visible"])
         if data.get("seq") != self._state["seq"]:
             return  # отчёт о прошлом треке
         if data.get("position") is not None:

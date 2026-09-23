@@ -18,6 +18,11 @@ Hermes выполняет ходы одного разговора строго 
 если в разговоре уже идёт ход, новая реплика уходит в параллельный разговор
 — без свежего контекста, зато сразу. Долгая память Hermes там та же.
 
+Hermes отвечает 503 (gateway_draining), пока перезагружается после
+`kill -USR1`, а при рестарте не принимает соединения. Такие ошибки случаются
+до начала потока — агент ещё ничего не сделал, и запрос безопасно повторить.
+Оборвавшийся поток не повторяем: инструменты могли уже сработать.
+
 Разговор начинается заново после паузы (как у Алисы): одна бессрочная
 conversation разрослась до 2500 сообщений и ~370k токенов на каждую реплику —
 медленно, дорого, и модель отвечала по старой истории («уже играет»)
@@ -27,7 +32,9 @@ conversation разрослась до 2500 сообщений и ~370k токе
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import time
 import uuid
 from typing import Any, Callable
@@ -37,12 +44,17 @@ import httpx
 from app.agent.prompts import VOICE_INSTRUCTIONS
 from app.config import settings
 
+logger = logging.getLogger("jarvis.hermes")
 
 # session_id → (conversation, время последней реплики). Живёт в процессе:
 # после рестарта ядра разговор тоже начинается заново — это нормально.
 _conversations: dict[str, tuple[str, float]] = {}
 # conversation → сколько ходов в нём сейчас выполняется.
 _running: dict[str, int] = {}
+
+# Паузы перед повторами запроса, который Hermes не начал выполнять.
+_RETRY_DELAYS = (2.0, 4.0, 8.0)
+_RETRY_STATUSES = {502, 503, 504}
 
 # Финальные события потока /v1/responses.
 _FINAL_EVENTS = ("response.completed", "response.failed", "response.incomplete")
@@ -64,9 +76,22 @@ async def run_hermes(
     conversation = main if not _running.get(main) else f"{main}-p{uuid.uuid4().hex[:6]}"
     _running[main] = _running.get(main, 0) + 1
     try:
-        return await _stream(conversation, user_text, on_tool)
+        return await _with_retries(conversation, user_text, on_tool)
     finally:
         _running[main] -= 1
+
+
+async def _with_retries(conversation: str, user_text: str, on_tool: Callable[[str], None] | None) -> tuple[str, list[str]]:
+    for delay in (*_RETRY_DELAYS, None):
+        try:
+            return await _stream(conversation, user_text, on_tool)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            if delay is None or (status is not None and status not in _RETRY_STATUSES):
+                raise
+            logger.warning("Hermes недоступен (%s) — повтор через %.0f с", status or type(exc).__name__, delay)
+            await asyncio.sleep(delay)
+    raise AssertionError("недостижимо")
 
 
 async def _stream(conversation: str, user_text: str, on_tool: Callable[[str], None] | None) -> tuple[str, list[str]]:

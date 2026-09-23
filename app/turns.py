@@ -22,6 +22,18 @@ POST через Caddy и ssh-туннель рвался (свёрнутая в�
     detach: STT → run → озвучка ─► emit {"type": "turn", id, transcript|tool|reply|error|cancelled}
                                         │ WebOutput хранит события (outputs.py)
     SSE переподключился ◄───────────────┘ пропущенные досылаются + список идущих ходов
+
+Основной план и фон. Отвечать быстро важнее, чем держать долгий ресерч
+на переднем плане:
+
+    реплика ─► start ─► уложился в бюджет (FOREGROUND_BUDGET_SECONDS)? ── да ─► ответ
+                            │ нет, или «…в фоне» (conflicts.wants_background)
+                            ▼
+                      demote: ход фоновый — не держит «думаю» и музыку,
+                      новые реплики его не отменяют (кроме ✕ и явного «отмени …»)
+                            │ готово
+                            ▼
+                      ответ событием (веб) или объявлением (asus, speaker.py)
 """
 
 from __future__ import annotations
@@ -50,6 +62,8 @@ class Turn:
     text: str
     task: asyncio.Task[Answer] = field(repr=False)
     tool: str | None = None
+    # Ушёл в фон: реплики-конфликты и «стоп» его не трогают.
+    background: bool = False
 
 
 @dataclass
@@ -71,20 +85,30 @@ class Turns:
         self._detached[turn_id] = _Detached(device=device, text=text, task=task)
         task.add_done_callback(lambda _: self._detached.pop(turn_id, None))
 
-    def active(self, device: str) -> list[dict[str, str | None]]:
+    def active(self, device: str) -> list[dict[str, object]]:
         """Идущие ходы устройства — экрану после переподключения SSE."""
-        return [
-            {"id": turn_id, "text": d.text, "tool": getattr(self._active.get(turn_id), "tool", None)}
-            for turn_id, d in self._detached.items()
-            if d.device == device
-        ]
+        result: list[dict[str, object]] = []
+        for turn_id, d in self._detached.items():
+            if d.device != device:
+                continue
+            turn = self._active.get(turn_id)
+            result.append({
+                "id": turn_id, "text": d.text,
+                "tool": turn.tool if turn else None,
+                "background": bool(turn and turn.background),
+            })
+        return result
 
-    async def run(
+    def busy(self) -> int:
+        """Ходы в работе, от расшифровки до озвучки ответа."""
+        return len(self._active.keys() | self._detached.keys())
+
+    def start(
         self, turn_id: str, session_id: str, device: str, text: str,
         work: Callable[[Progress], Awaitable[Answer]],
-    ) -> Answer | None:
-        """Ответ хода или None, если его отменили (новой репликой или ✕)."""
-        running = [t for t in self._active.values() if t.session_id == session_id]
+    ) -> Turn:
+        """Запустить ход; новая реплика может отменить идущие на переднем плане."""
+        running = [t for t in self._active.values() if t.session_id == session_id and not t.background]
 
         def progress(tool: str) -> None:
             if current := self._active.get(turn_id):
@@ -97,14 +121,28 @@ class Turns:
         task.add_done_callback(lambda _: self._active.pop(turn_id, None))
         if running:
             asyncio.create_task(self._resolve(turn, running))
+        return turn
 
+    @staticmethod
+    async def within(turn: Turn, seconds: float) -> bool:
+        """Закончился ли ход за seconds (сам ход при этом не трогаем)."""
+        done, _ = await asyncio.wait({turn.task}, timeout=seconds)
+        return bool(done)
+
+    @staticmethod
+    def demote(turn: Turn) -> None:
+        logger.info("«%s» уходит в фон", turn.text)
+        turn.background = True
+
+    async def outcome(self, turn: Turn) -> Answer | None:
+        """Ответ хода или None, если его отменили (новой репликой или ✕)."""
         # wait, а не await task: если оборвался сам HTTP-запрос клиента,
         # задача продолжает выполняться.
-        await asyncio.wait({task})
-        if task.cancelled():
-            self.emit(device, turn_id, cancelled=True)
+        await asyncio.wait({turn.task})
+        if turn.task.cancelled():
+            self.emit(turn.device, turn.id, cancelled=True)
             return None
-        return task.result()
+        return turn.task.result()
 
     def emit(self, device: str, turn_id: str, **fields: object) -> None:
         """Событие хода на экран устройства. У asus экрана нет."""
@@ -127,10 +165,12 @@ class Turns:
                 old.task.cancel()
 
     def cancel(self, session_id: str, turn_id: str | None = None) -> int:
-        """Отменить одну просьбу (✕ в чате) или все просьбы сессии."""
+        """Отменить одну просьбу (✕ в чате, в том числе фоновую) или все
+        просьбы сессии на переднем плане («стоп» не трогает фоновый ресерч)."""
         victims = [
             t for t in self._active.values()
-            if t.session_id == session_id and not t.task.done() and turn_id in (None, t.id)
+            if t.session_id == session_id and not t.task.done()
+            and (t.id == turn_id if turn_id else not t.background)
         ]
         for t in victims:
             t.task.cancel()

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     hermes_api_key: str = ""
     # Столько минут тишины — и голосовой разговор начинается с чистой истории.
     hermes_conversation_idle_minutes: int = 10
+    # Дольше этого ход не держит основной план: уходит в фон (app/turns.py).
+    foreground_budget_seconds: float = 12.0
+    # Контакт в подписи VAPID (Apple требует mailto: или https:) — app/services/webpush.py.
+    push_contact: str = "https://point.abrdns.com"
     # Отсюда берутся токен бота и чат для «пришли мне в Telegram».
     hermes_env_file: str = "~/.hermes/.env"
 

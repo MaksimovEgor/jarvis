@@ -41,5 +41,12 @@ export function useEarcon() {
     tone(440, 0.08, 0.16, 0.12)
   }
 
-  return { unlock, listen, cancel }
+  // Три ноты вверх — фоновая задача готова, сейчас прозвучит ответ.
+  function ready(): void {
+    tone(659, 0, 0.14)
+    tone(880, 0.12, 0.14)
+    tone(1319, 0.24, 0.26)
+  }
+
+  return { unlock, listen, cancel, ready }
 }

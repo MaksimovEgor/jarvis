@@ -48,6 +48,22 @@ class CancelRequest(BaseModel):
     turn_id: str | None = None  # нет — отменить все просьбы сессии
 
 
+class PushSubscription(BaseModel):
+    """PushSubscription.toJSON() из браузера."""
+    endpoint: str
+    keys: dict[str, str]
+
+
+class PushSubscribeRequest(BaseModel):
+    device: str
+    subscription: PushSubscription
+
+
+class PushUnsubscribeRequest(BaseModel):
+    device: str
+    endpoint: str
+
+
 class ClientLog(BaseModel):
     device: str
     message: str

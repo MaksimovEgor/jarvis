@@ -13,3 +13,6 @@ numpy
 edge-tts
 vosk-tts
 aiohttp-socks
+# Web Push (app/services/webpush.py): VAPID и шифрование; уже приходят с mcp
+cryptography
+PyJWT

@@ -5,7 +5,12 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/jarvis
-ExecStart=%h/jarvis/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+# --timeout-graceful-shutdown: открытые SSE браузеров (/player/events) иначе
+# держат остановку до TimeoutStopSec и SIGKILL.
+ExecStart=%h/jarvis/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5
+# Перезапуск ждёт, пока ядро доделает ходы (до 120 с), — см. scripts/wait_idle.sh.
+ExecStop=%h/jarvis/scripts/wait_idle.sh
+TimeoutStopSec=150
 Restart=on-failure
 RestartSec=5
 

@@ -2,12 +2,14 @@
 import { computed, ref, watch } from 'vue'
 
 import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, type SpeechMore } from './api'
+import BackgroundTasks from './components/BackgroundTasks.vue'
 import ChatLog from './components/ChatLog.vue'
 import PlayerBar from './components/PlayerBar.vue'
 import TalkButton from './components/TalkButton.vue'
 import { useEarcon } from './composables/useEarcon'
 import { useMusic } from './composables/useMusic'
 import { usePlayer } from './composables/usePlayer'
+import { usePush } from './composables/usePush'
 import { useRecorder } from './composables/useRecorder'
 import { useWakeWord } from './composables/useWakeWord'
 import type { Message, Status, TurnEvent, TurnsEvent } from './types'
@@ -15,6 +17,7 @@ import type { Message, Status, TurnEvent, TurnsEvent } from './types'
 const recorder = useRecorder()
 const player = usePlayer()
 const earcon = useEarcon()
+const notifications = usePush()
 // Объявления таймеров играет голосовой плеер, музыка на это время молчит.
 const music = useMusic((url) => player.playUrl(url), onTurn, onTurns)
 const {
@@ -75,6 +78,8 @@ interface InFlight {
   accepted: boolean
   // Музыка удержана на этот ход (реплика с этой вкладки).
   held: boolean
+  // Ушёл в фон: «думаю» и музыку уже не держит.
+  background: boolean
 }
 
 // Ходы в работе по id. Сюда же попадают идущие ходы, о которых вкладка
@@ -83,12 +88,31 @@ const inFlight = new Map<string, InFlight>()
 // Завершённые — повторно досланный итог не показываем дважды.
 const settled = new Set<string>()
 
-function begin(turnId: string, msg: Message, held: boolean): InFlight {
-  const entry: InFlight = { msg, accepted: false, held }
-  msg.pending = { turnId, since: Date.now() }
+function begin(turnId: string, msg: Message, held: boolean, background = false): InFlight {
+  const entry: InFlight = { msg, accepted: false, held, background }
+  msg.pending = { turnId, since: Date.now(), background }
   inFlight.set(turnId, entry)
-  pending.value += 1
+  if (!background) pending.value += 1
   return entry
+}
+
+const backgroundTasks = computed(() => messages.value.filter((m) => m.pending?.background))
+
+function isFresh(event: TurnEvent): boolean {
+  return (event.age ?? 0) < SPEAK_FRESH_SECONDS
+}
+
+// Ход ушёл в фон: основной план свободен — снять «думаю», озвучить
+// подтверждение и вернуть музыку.
+async function toBackground(entry: InFlight, event: TurnEvent): Promise<void> {
+  entry.background = true
+  if (entry.msg.pending) entry.msg.pending.background = true
+  pending.value -= 1
+  const held = entry.held
+  entry.held = false
+  if (event.ack) push('assistant', event.ack)
+  if (event.speech && isFresh(event)) await speak(event.speech)
+  if (held) music.release()
 }
 
 // Ход закончился: снять «думаю». Музыку отпускает вызывающий — после озвучки.
@@ -98,7 +122,7 @@ function settle(turnId: string): InFlight | undefined {
   if (!entry) return undefined
   inFlight.delete(turnId)
   entry.msg.pending = undefined
-  pending.value -= 1
+  if (!entry.background) pending.value -= 1
   return entry
 }
 
@@ -106,6 +130,10 @@ async function onTurn(event: TurnEvent): Promise<void> {
   const entry = inFlight.get(event.id)
   if (event.transcript !== undefined && entry) entry.msg.text = event.transcript || '(не расслышал)'
   if (event.tool && entry?.msg.pending) entry.msg.pending.tool = event.tool
+  if (event.background && entry && !entry.background) {
+    await toBackground(entry, event)
+    return
+  }
   const final = event.reply !== undefined || event.cancelled || event.error !== undefined
   if (!final || settled.has(event.id)) return
 
@@ -116,7 +144,17 @@ async function onTurn(event: TurnEvent): Promise<void> {
     push('error', event.error)
   } else {
     push('assistant', event.reply ?? '', event.tools)
-    if (event.speech && (event.age ?? 0) < SPEAK_FRESH_SECONDS) await speak(event.speech)
+    if (event.speech && isFresh(event)) {
+      if (done?.background) {
+        // Фоновая задача готова: сигнал, и музыка молчит, пока звучит ответ.
+        music.hold()
+        earcon.ready()
+        await speak(event.speech)
+        music.release()
+      } else {
+        await speak(event.speech)
+      }
+    }
   }
   if (done?.held) music.release()
 }
@@ -125,18 +163,27 @@ async function onTurn(event: TurnEvent): Promise<void> {
 function onTurns(event: TurnsEvent): void {
   const active = new Set(event.active.map((t) => t.id))
   // Принятый ход пропал с ядра, а итога нет — ядро перезапускалось.
-  for (const [turnId, entry] of inFlight) {
-    if (!entry.accepted || active.has(turnId)) continue
-    settle(turnId)
-    push('error', 'Ответ потерялся: Джарвис перезапускался. Повтори, пожалуйста.')
-    if (entry.held) music.release()
-  }
+  const lost = [...inFlight].filter(([turnId, entry]) => entry.accepted && !active.has(turnId))
+  if (lost.length) void recoverLost(lost)
   // Идущие ходы, о которых вкладка не знает (её перезагрузили), — на экран.
   for (const t of event.active) {
     if (inFlight.has(t.id) || settled.has(t.id)) continue
-    const entry = begin(t.id, push('user', t.text || '…'), false)
+    const entry = begin(t.id, push('user', t.text || '…'), false, t.background)
     entry.accepted = true
     if (entry.msg.pending && t.tool) entry.msg.pending.tool = t.tool
+  }
+}
+
+// Ответ мог успеть записаться в историю до перезапуска — ищем его там.
+async function recoverLost(lost: [string, InFlight][]): Promise<void> {
+  const history = await fetchHistory()
+  for (const [turnId, entry] of lost) {
+    if (!settle(turnId)) continue
+    const found = history.find((e) => e.turn_id === turnId)
+    if (found?.cancelled) entry.msg.cancelled = true
+    else if (found) push('assistant', found.reply, found.tools)
+    else push('error', 'Ответ потерялся: Джарвис перезапускался. Повтори, пожалуйста.')
+    if (entry.held) music.release()
   }
 }
 
@@ -326,6 +373,15 @@ function errorText(e: unknown): string {
         :class="[`app__dot--${status}`, { 'app__dot--wake': status === 'idle' && wake.listening.value }]"
       />
       Джарвис
+      <span class="app__spacer" />
+      <button
+        v-if="notifications.supported && !notifications.enabled.value"
+        class="app__wake"
+        :title="notifications.error.value ?? 'Сообщать о готовых задачах, когда Джарвис свёрнут'"
+        @click="notifications.enable"
+      >
+        {{ notifications.error.value ? 'Уведомления: ошибка' : 'Уведомления' }}
+      </button>
       <button
         v-if="wake.supported"
         class="app__wake"
@@ -351,6 +407,8 @@ function errorText(e: unknown): string {
       @stop="music.stop"
       @seek="music.seek"
     />
+
+    <BackgroundTasks :tasks="backgroundTasks" @cancel="onCancel" />
 
     <ChatLog :messages="messages" @cancel="onCancel" />
 
@@ -407,8 +465,11 @@ function errorText(e: unknown): string {
     }
   }
 
+  &__spacer {
+    flex: 1;
+  }
+
   &__wake {
-    margin-left: auto;
     padding: 6px 12px;
     border-radius: 999px;
     border: 1px solid var(--border);

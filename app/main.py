@@ -22,12 +22,15 @@ from app.agent.orchestrator import run_agent
 from app.config import settings
 from app.mcp_server import mcp
 from app.music import devices, media, web_player
-from app.schemas import AudioChatResponse, AudioMore, CancelRequest, ClientLog, TextChatRequest, TextChatResponse
-from app.services import speech, stt, tts
+from app.schemas import (
+    AudioChatResponse, AudioMore, CancelRequest, ClientLog, PushSubscribeRequest, PushUnsubscribeRequest,
+    TextChatRequest, TextChatResponse,
+)
+from app.services import speaker, speech, stt, tts, webpush
 from app.services.speech import Spoken
 from app.services.hermes import run_hermes
 from app.timers import timers
-from app.turns import turns
+from app.turns import Turn, turns
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis.core")
@@ -51,7 +54,7 @@ app.router.routes.extend(_mcp_app.routes)
 app.include_router(media.router)
 app.include_router(web_player.router)
 
-_LOCAL_ONLY = ("/mcp", "/music")
+_LOCAL_ONLY = ("/mcp", "/music", "/admin")
 
 
 class _LocalOnly:
@@ -117,16 +120,59 @@ async def _answer(
     return reply, tools, await speech.speak(reply, inline) if speak else None
 
 
-async def _run_turn(
-    turn_id: str, session_id: str, device: str, text: str, speak: bool, inline: bool = True,
-) -> tuple[str, list[str], Spoken | None] | None:
-    result = await turns.run(
+_ACK_ASKED = "Хорошо, займусь в фоне и скажу, когда будет готово."
+_ACK_SLOW = "Это займёт время. Скажу, когда будет готово."
+
+# Фоновые продолжения ходов asus — ссылки, чтобы задачи не собрал GC.
+_background: set[asyncio.Task[None]] = set()
+
+
+async def _start_turn(
+    turn_id: str, session_id: str, device: str, text: str, speak: bool, inline: bool,
+) -> tuple[Turn, str | None]:
+    """Запустить ход и подождать его в пределах бюджета основного плана.
+    Вторым — подтверждение для пользователя, если ход ушёл в фон, иначе None."""
+    turn = turns.start(
         turn_id, session_id, device, text,
         lambda progress: _answer(session_id, text, device, speak, inline, progress),
     )
+    asked = conflicts.wants_background(text)
+    if await turns.within(turn, 0 if asked else settings.foreground_budget_seconds):
+        return turn, None
+    turns.demote(turn)
+    return turn, _ACK_ASKED if asked else _ACK_SLOW
+
+
+async def _finish_turn(turn: Turn) -> tuple[str, list[str], Spoken | None] | None:
+    result = await turns.outcome(turn)
     reply, tools = (result[0], result[1]) if result else ("", [])
-    history.append(session_id, text, reply, tools, cancelled=result is None)
+    history.append(turn.session_id, turn.text, reply, tools, cancelled=result is None, turn_id=turn.id)
     return result
+
+
+async def _run_turn(
+    turn_id: str, session_id: str, device: str, text: str, speak: bool,
+) -> tuple[str, list[str], Spoken | None] | None:
+    """Синхронный ход (listener asus): не уложился в бюджет — сразу отвечаем
+    подтверждением, а готовый ответ потом объявляет speaker."""
+    turn, ack = await _start_turn(turn_id, session_id, device, text, speak, True)
+    if ack is None:
+        return await _finish_turn(turn)
+    task = asyncio.create_task(_announce_when_done(turn))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return ack, [], await speech.speak(ack) if speak else None
+
+
+async def _announce_when_done(turn: Turn) -> None:
+    try:
+        result = await _finish_turn(turn)
+    except Exception:
+        logger.exception("Фоновый ход «%s» упал", turn.text)
+        await speaker.announce("Не получилось выполнить фоновую задачу.", turn.device)
+        return
+    if result is not None:
+        await speaker.announce(result[0], turn.device)
 
 
 async def _transcribe(data: bytes, filename: str | None) -> str:
@@ -153,24 +199,50 @@ def _detach(
                 reply, tools, spoken = "Не расслышал.", [], await speech.speak("Не расслышал.", False)
             elif conflicts.is_just_stop(heard):
                 reply, tools, spoken = await _stop_everything(session_id, device, speak, False)
-                history.append(session_id, heard, reply, tools)
+                history.append(session_id, heard, reply, tools, turn_id=turn_id)
             else:
-                result = await _run_turn(turn_id, session_id, device, heard, speak, False)
+                turn, ack = await _start_turn(turn_id, session_id, device, heard, speak, False)
+                if ack is not None:
+                    # Основной план свободен: экран снимает «думаю», звучит подтверждение.
+                    turns.emit(device, turn_id, background=True, ack=ack,
+                               speech=_speech_ref(await speech.speak(ack, False) if speak else None))
+                result = await _finish_turn(turn)
                 if result is None:
-                    return  # об отмене экран уже знает (turns.run)
+                    return  # об отмене экран уже знает (turns.outcome)
                 reply, tools, spoken = result
-            speech_ref = {"id": spoken.job_id, "count": spoken.count} if spoken and spoken.job_id else None
-            turns.emit(device, turn_id, reply=reply, tools=tools, speech=speech_ref)
+                if ack is not None:
+                    await _push_if_away(device, turn_id, reply)
+            turns.emit(device, turn_id, reply=reply, tools=tools, speech=_speech_ref(spoken))
         except Exception as exc:
             logger.exception("Ход %s упал", turn_id)
-            turns.emit(device, turn_id, error=f"Не получилось: {exc}"[:300])
+            error = f"Не получилось: {exc}"[:300]
+            await _push_if_away(device, turn_id, error)
+            turns.emit(device, turn_id, error=error)
 
     turns.detach(turn_id, device, text or "", job())
+
+
+async def _push_if_away(device: str, turn_id: str, text: str) -> None:
+    """Долгий ход закончился, а вкладка свёрнута — пуш. Открытый экран
+    покажет и озвучит ответ сам."""
+    if not devices.web_output(device).watching:
+        await webpush.notify(device, "Джарвис", text, tag=turn_id)
+
+
+def _speech_ref(spoken: Spoken | None) -> dict[str, Any] | None:
+    return {"id": spoken.job_id, "count": spoken.count} if spoken and spoken.job_id else None
 
 
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/admin/busy")
+async def admin_busy() -> dict:
+    """Сколько ходов выполняется — перезапуск ядра ждёт нуля
+    (scripts/wait_idle.sh в ExecStop юнита), чтобы не оборвать ход."""
+    return {"turns": turns.busy() + len(_background)}
 
 
 @app.post("/chat/text", response_model=TextChatResponse)
@@ -226,6 +298,25 @@ async def chat_audio(
         return AudioChatResponse(transcript=transcript, reply="", cancelled=True)
     reply, tool_calls, spoken = result
     return AudioChatResponse(transcript=transcript, reply=reply, tool_calls=tool_calls, **_audio(spoken))
+
+
+@app.get("/push/key")
+async def push_key() -> dict:
+    return {"key": webpush.public_key()}
+
+
+@app.post("/push/subscribe")
+async def push_subscribe(req: PushSubscribeRequest) -> dict:
+    if req.device == devices.ASUS:
+        raise HTTPException(400, "пуши — только для веб-устройств")
+    webpush.subscribe(_device(req.device), req.subscription.model_dump())
+    return {"status": "ok"}
+
+
+@app.post("/push/unsubscribe")
+async def push_unsubscribe(req: PushUnsubscribeRequest) -> dict:
+    webpush.unsubscribe(_device(req.device), req.endpoint)
+    return {"status": "ok"}
 
 
 @app.post("/client/log")

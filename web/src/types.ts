@@ -8,7 +8,8 @@ export interface Message {
   // Реплику отменила более новая («стоп», «нет, включи другое») или ✕.
   cancelled?: boolean
   // Просьба ещё выполняется: id хода (для ✕), с какого момента, что делает.
-  pending?: { turnId: string; since: number; tool?: string }
+  // background — ушла в фон: не держит «думаю», видна в полоске фоновых задач.
+  pending?: { turnId: string; since: number; tool?: string; background?: boolean }
 }
 
 // Запись истории чата с ядра (GET /chat/history).
@@ -18,6 +19,8 @@ export interface HistoryEntry {
   reply: string
   tools: string[]
   cancelled: boolean
+  // id хода — по нему находится ответ, событие которого потерялось.
+  turn_id?: string | null
 }
 
 // Снимок плеера этого устройства от ядра (SSE /player/events).
@@ -52,6 +55,9 @@ export interface TurnEvent {
   speech?: { id: string; count: number } | null
   cancelled?: boolean
   error?: string
+  // Ход ушёл в фон: ack — подтверждение («скажу, когда будет готово»), speech — его озвучка.
+  background?: boolean
+  ack?: string
   // Событие дослано после переподключения SSE — столько секунд назад.
   age?: number
 }
@@ -59,5 +65,5 @@ export interface TurnEvent {
 // После (пере)подключения SSE — какие ходы устройства ещё идут на ядре.
 export interface TurnsEvent {
   type: 'turns'
-  active: { id: string; text: string; tool: string | null }[]
+  active: { id: string; text: string; tool: string | null; background: boolean }[]
 }

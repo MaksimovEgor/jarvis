@@ -1,40 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 
+import { toolLabel } from '../toolLabels'
 import type { Message } from '../types'
 
 const props = defineProps<{ messages: Message[] }>()
 const emit = defineEmits<{ cancel: [turnId: string] }>()
 
 const log = ref<HTMLElement | null>(null)
-
-// Что делает Джарвис — по-человечески, а не именами инструментов.
-const TOOL_LABELS: Record<string, string> = {
-  play_music: 'включаю',
-  play_radio: 'включаю радио',
-  resume_listening: 'включаю',
-  web_search: 'ищу в интернете',
-  web_extract: 'читаю страницу',
-  terminal: 'выполняю команду',
-  execute_code: 'считаю',
-  skill_view: 'вспоминаю, как это делать',
-  tool_search: 'выбираю инструмент',
-  tool_describe: 'выбираю инструмент',
-  cronjob_manage: 'планирую задачу',
-  send_telegram: 'отправляю в Telegram',
-  session_search: 'вспоминаю',
-  memory: 'запоминаю',
-  read_file: 'читаю файл',
-  search_files: 'ищу файлы',
-  set_timer: 'ставлю таймер',
-  remind: 'ставлю напоминание',
-}
-
-function toolLabel(tool?: string): string {
-  if (!tool) return 'думаю'
-  const name = tool.replace(/^mcp__\w+?__/, '')
-  return TOOL_LABELS[name] ?? name
-}
 
 // Секундомер для выполняющихся просьб — тикает, только пока они есть.
 const now = ref(Date.now())
@@ -83,7 +56,7 @@ watch(
       <small v-if="m.cancelled" class="log__tools">отменено</small>
       <small v-else-if="m.pending" class="log__pending">
         <span class="log__spinner" />
-        {{ elapsed(m.pending.since) }} · {{ toolLabel(m.pending.tool) }}
+        {{ elapsed(m.pending.since) }} · {{ m.pending.background ? 'в фоне · ' : '' }}{{ toolLabel(m.pending.tool) }}
         <button class="log__cancel" type="button" aria-label="Отменить" @click="emit('cancel', m.pending.turnId)">
           ✕
         </button>

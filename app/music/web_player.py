@@ -36,6 +36,8 @@ class PlayerReport(BaseModel):
     error: str | None = None
     volume_supported: bool | None = None
     hls: bool | None = None
+    # Вкладка на экране или свёрнута — решает, слать ли пуш.
+    visible: bool | None = None
 
 
 class PlayerControl(BaseModel):

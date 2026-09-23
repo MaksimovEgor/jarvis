@@ -32,6 +32,12 @@ _CANCEL_ALL = re.compile(
 _JUST_STOP = re.compile(
     r"^\W*(стоп|хватит|отмена|отмени|замолчи|тихо|стой|не надо)\W*$", re.IGNORECASE
 )
+# «Поищи в фоне…», «разберись и потом расскажи» — сразу в фон, не ждать бюджета.
+_BACKGROUND = re.compile(
+    r"\bв\s+фоне\b|\bне\s+спеши\w*\b|\bпотом\s+(?:расскажи|скажи|доложи)\b"
+    r"|\bкогда\s+(?:будет\s+готово|закончишь|разберешься|разберёшься)\b",
+    re.IGNORECASE,
+)
 _MEDIA = re.compile(r"\b(включи|поставь|сыграй|играй|запусти|врубай|вруби)\b", re.IGNORECASE)
 _LLM_TIMEOUT = 5.0
 
@@ -59,6 +65,10 @@ async def _ask_llm(new: str, running: list[str]) -> list[int]:
 
 def is_just_stop(text: str) -> bool:
     return bool(_JUST_STOP.match(text))
+
+
+def wants_background(text: str) -> bool:
+    return bool(_BACKGROUND.search(text))
 
 
 async def to_cancel(new: str, running: list[str]) -> list[int]:

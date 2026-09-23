@@ -68,6 +68,16 @@ export async function cancelTurn(turnId: string): Promise<void> {
   await postJson('chat/cancel', { session_id: SESSION_ID, turn_id: turnId })
 }
 
+export async function fetchPushKey(): Promise<string> {
+  const resp = await fetch('push/key')
+  if (!resp.ok) throw new Error(`Сервер ответил ${resp.status}`)
+  return ((await resp.json()) as { key: string }).key
+}
+
+export async function savePushSubscription(subscription: PushSubscriptionJSON): Promise<void> {
+  await postJson('push/subscribe', { device: DEVICE_ID, subscription })
+}
+
 export type PlayerAction = 'pause' | 'resume' | 'next' | 'previous' | 'stop' | 'seek'
 
 export interface PlayerReport {
@@ -78,6 +88,8 @@ export interface PlayerReport {
   error?: string
   volume_supported?: boolean
   hls?: boolean
+  // Вкладка на экране: свёрнутой ядро шлёт готовое пушем.
+  visible?: boolean
 }
 
 // Диагностика с телефона в журнал ядра: в Safari на iPhone нет консоли под рукой.
