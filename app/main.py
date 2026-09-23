@@ -311,7 +311,10 @@ async def push_key() -> dict:
 async def push_subscribe(req: PushSubscribeRequest) -> dict:
     if req.device == devices.ASUS:
         raise HTTPException(400, "пуши — только для веб-устройств")
-    webpush.subscribe(_device(req.device), req.subscription.model_dump())
+    device = _device(req.device)
+    if webpush.subscribe(device, req.subscription.model_dump()):
+        # Сразу видно, что цепочка работает, — не ждать первой фоновой задачи.
+        asyncio.create_task(webpush.notify(device, "Джарвис", "Уведомления включены. Сообщу, когда фоновая задача будет готова."))
     return {"status": "ok"}
 
 

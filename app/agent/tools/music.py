@@ -39,6 +39,8 @@ SCHEMA = {
 async def run(arguments: dict) -> str:
     action = arguments["action"]
     player = devices.current_player()
+    if player is None:
+        return "Не знаю, где включить: открой Джарвиса на телефоне или в браузере."
     if action == "play":
         source = arguments.get("source", "youtube")
         query = arguments.get("query", "")

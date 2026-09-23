@@ -2,7 +2,7 @@
 
 Когда шлём (решает вызывающий, см. main.py и speaker.py):
     фоновая задача готова / упала, а экран её не видит  → пуш с ответом
-    таймер/напоминание, а веб-устройство не на связи    → пуш + звук на asus
+    таймер/напоминание, а экран свёрнут                → пуш (нет подписки — Telegram)
 
     ядро ──(VAPID-подпись, шифрование aes128gcm)──► push-сервис браузера
           (web.push.apple.com, fcm.googleapis.com…) ──► sw.js ──► уведомление
@@ -100,21 +100,20 @@ def _save(data: dict[str, list[dict[str, Any]]]) -> None:
     tmp.replace(SUBSCRIPTIONS_FILE)
 
 
-def subscribe(device: str, subscription: dict[str, Any]) -> None:
+def subscribe(device: str, subscription: dict[str, Any]) -> bool:
+    """True — подписка новая (браузер подписывает заново при каждом открытии)."""
     data = _load()
     subs = [s for s in data.get(device, []) if s["endpoint"] != subscription["endpoint"]]
+    new = len(subs) == len(data.get(device, []))
     data[device] = [*subs, subscription]
     _save(data)
+    return new
 
 
 def unsubscribe(device: str, endpoint: str) -> None:
     data = _load()
     data[device] = [s for s in data.get(device, []) if s["endpoint"] != endpoint]
     _save(data)
-
-
-def has_subscription(device: str) -> bool:
-    return bool(_load().get(device))
 
 
 # --- отправка ----------------------------------------------------------------
@@ -183,13 +182,17 @@ async def send(device: str, title: str, body: str, tag: str | None = None) -> in
             elif resp.status_code >= 400:
                 logger.warning("Пуш на %s: %s %s", urlsplit(endpoint).netloc, resp.status_code, resp.text[:200])
             else:
+                # Успех тоже в журнал: иначе «пуш не пришёл» нечем проверить.
+                logger.info("Пуш ушёл на %s: %s", urlsplit(endpoint).netloc, resp.status_code)
                 sent += 1
     return sent
 
 
-async def notify(device: str, title: str, body: str, tag: str | None = None) -> None:
-    """send без исключений — пуш не должен ронять ход или таймер."""
+async def notify(device: str, title: str, body: str, tag: str | None = None) -> int:
+    """send без исключений — пуш не должен ронять ход или таймер. Вернёт,
+    скольким подпискам ушло (0 — не ушло никуда)."""
     try:
-        await send(device, title, body, tag)
+        return await send(device, title, body, tag)
     except Exception:
         logger.exception("Пуш на %s упал", device)
+        return 0

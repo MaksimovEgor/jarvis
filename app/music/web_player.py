@@ -54,6 +54,7 @@ async def events(
     заголовком Last-Event-ID при автопереподключении, а при новом EventSource
     (вкладка вернулась из фона) — параметром."""
     device = _web_device(device)
+    devices.seen(device)  # открыл страницу — теперь звук по умолчанию сюда
     output = devices.web_output(device)
     queue = output.subscribe(since or last_event_id, turns.active(device))
 

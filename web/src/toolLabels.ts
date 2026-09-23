@@ -5,6 +5,9 @@ const TOOL_LABELS: Record<string, string> = {
   resume_listening: 'включаю',
   web_search: 'ищу в интернете',
   web_extract: 'читаю страницу',
+  // Инструменты встроенного агента (AGENT_BACKEND=builtin).
+  web_fetch: 'читаю страницу',
+  music: 'управляю музыкой',
   terminal: 'выполняю команду',
   execute_code: 'считаю',
   skill_view: 'вспоминаю, как это делать',

@@ -1,0 +1,769 @@
+<title>Как работает Джарвис</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #f3f6f7;
+    --surface: #ffffff;
+    --sunken: #e8eef0;
+    --ink: #13212a;
+    --ink-dim: #52646e;
+    --line: #d3dde1;
+    --accent: #0e7a70;
+    --accent-soft: #d6efec;
+    --warn: #a4660f;
+    --warn-soft: #f7ead3;
+    --danger: #ad3b2b;
+    --danger-soft: #f8e0dc;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --sans: "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
+    --display: "Onest", "IBM Plex Sans", -apple-system, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #0d1519;
+      --surface: #142027;
+      --sunken: #1a2830;
+      --ink: #dbe6ea;
+      --ink-dim: #93a6af;
+      --line: #283a43;
+      --accent: #3fc2b3;
+      --accent-soft: #143a38;
+      --warn: #e2a64a;
+      --warn-soft: #3a2d15;
+      --danger: #ef8a78;
+      --danger-soft: #3e1f1a;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0d1519;
+    --surface: #142027;
+    --sunken: #1a2830;
+    --ink: #dbe6ea;
+    --ink-dim: #93a6af;
+    --line: #283a43;
+    --accent: #3fc2b3;
+    --accent-soft: #143a38;
+    --warn: #e2a64a;
+    --warn-soft: #3a2d15;
+    --danger: #ef8a78;
+    --danger-soft: #3e1f1a;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 15px/1.6 var(--sans);
+    padding-inline: 16px;
+  }
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 48px;
+    padding-block: 40px 80px;
+  }
+  nav.toc {
+    position: sticky;
+    top: calc(24px + env(safe-area-inset-top, 0px));
+    align-self: start;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  nav.toc b {
+    font: 600 11px/1 var(--display);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-bottom: 10px;
+  }
+  nav.toc a {
+    color: var(--ink-dim);
+    text-decoration: none;
+    padding: 4px 10px;
+    border-left: 2px solid var(--line);
+  }
+  nav.toc a:hover, nav.toc a:focus-visible { color: var(--accent); border-left-color: var(--accent); outline: none; }
+  main { min-width: 0; display: flex; flex-direction: column; gap: 56px; }
+
+  header.intro { display: flex; flex-direction: column; gap: 14px; }
+  .eyebrow {
+    font: 600 12px/1 var(--mono);
+    color: var(--accent);
+    letter-spacing: 0.04em;
+  }
+  h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.1; font-weight: 700; letter-spacing: -0.01em; }
+  h2 { font-size: 26px; line-height: 1.2; font-weight: 700; }
+  h3 { font-size: 17px; font-weight: 600; }
+  p { margin: 0; max-width: 72ch; }
+  .lead { font-size: 17px; color: var(--ink-dim); }
+  section { display: flex; flex-direction: column; gap: 18px; scroll-margin-top: 24px; }
+  section > .sub { color: var(--ink-dim); }
+
+  code, .m { font-family: var(--mono); font-size: 0.86em; }
+  code { background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
+
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px;
+    overflow-x: auto;
+  }
+  .diagram pre.mermaid { margin: 0; text-align: center; font-family: var(--sans); }
+  .diagram pre.mermaid:not([data-processed]) { color: transparent; min-height: 120px; }
+  .caption { font-size: 13px; color: var(--ink-dim); }
+
+  .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; counter-reset: step; }
+  .steps li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 4px 14px;
+    padding: 14px 0;
+    border-top: 1px solid var(--line);
+  }
+  .steps li::before {
+    content: counter(step);
+    grid-row: span 2;
+    font: 600 13px/28px var(--mono);
+    width: 28px; height: 28px;
+    text-align: center;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .steps .who { font-weight: 600; }
+  .steps .who .m { color: var(--ink-dim); font-weight: 400; }
+  .steps .what { color: var(--ink); }
+  .steps .fail { color: var(--danger); font-size: 14px; }
+
+  .tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  th { font: 600 12px/1.3 var(--display); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-dim); background: var(--sunken); }
+  tr:last-child td { border-bottom: 0; }
+  td .m { white-space: nowrap; }
+
+  .pill { display: inline-block; font: 500 12px/1 var(--mono); padding: 4px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill.ok { background: var(--accent-soft); color: var(--accent); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.bad { background: var(--danger-soft); color: var(--danger); }
+
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .note {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 10px;
+    padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .note.hot { border-color: var(--warn); }
+  .note h3 { font-size: 15px; }
+  .note p { font-size: 14px; }
+  ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; max-width: 76ch; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; color: var(--ink-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; border: 1px solid var(--line); }
+
+  @media (max-width: 860px) {
+    .wrap { grid-template-columns: minmax(0, 1fr); gap: 24px; padding-block: 24px 60px; }
+    nav.toc { position: static; flex-direction: row; flex-wrap: wrap; gap: 6px; }
+    nav.toc b { width: 100%; margin-bottom: 2px; }
+    nav.toc a { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; }
+  }
+</style>
+
+<div class="wrap">
+  <nav class="toc" aria-label="Разделы">
+    <b>Разделы</b>
+    <a href="#map">Карта системы</a>
+    <a href="#scenario">«Джарвис, включи музыку»</a>
+    <a href="#input">Как начинается реплика</a>
+    <a href="#core">Ход в ядре</a>
+    <a href="#router">Быстрые команды</a>
+    <a href="#hermes">Hermes и MCP</a>
+    <a href="#parallel">Параллельно и отмена</a>
+    <a href="#player">Плеер</a>
+    <a href="#voice">Озвучка</a>
+    <a href="#timers">Таймеры и объявления</a>
+    <a href="#delivery">Доставка и обрывы</a>
+    <a href="#failures">Все сбои</a>
+    <a href="#endpoints">Эндпоинты и данные</a>
+    <a href="#legacy">Listener asus</a>
+    <a href="#findings">Неточности</a>
+  </nav>
+
+  <main>
+    <header class="intro">
+      <span class="eyebrow">jarvis · docs/architecture.html</span>
+      <h1>Как работает Джарвис: от «Джарвис» до звука</h1>
+      <p class="lead">Кто слышит, кто распознаёт, кто решает, кто играет и что происходит при каждом сбое. Схема отражает код в рабочей копии, включая рефакторинг «asus — только сервер».</p>
+    </header>
+
+    <!-- ============================================================ -->
+    <section id="map">
+      <h2>Карта системы</h2>
+      <p class="sub">Три машины. Звук есть только у браузера: asus — сервер, point — вход снаружи. Браузер держит одно SSE-соединение, через которое приходит всё: плеер, ход разговора, объявления.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph PHONE["Телефон / Mac — браузер (web/)"]
+    WW["useWakeWord<br/>Web Speech API"]
+    REC["useRecorder<br/>MediaRecorder + автостоп"]
+    APP["App.vue<br/>ходы, очередь озвучки"]
+    MUS["useMusic<br/>#lt;audio#gt; музыки"]
+    VOICE["usePlayer<br/>#lt;audio#gt; голоса"]
+    SW["sw.js<br/>пуши"]
+  end
+  subgraph POINT["VPS point"]
+    CADDY["Caddy :8446<br/>basic auth, HTTPS"]
+  end
+  subgraph ASUS["asus — сервер"]
+    CORE["jarvis-core :8000<br/>app/main.py"]
+    STT["stt.py<br/>faster-whisper, GPU"]
+    TTSS["jarvis-tts :8001<br/>Vosk"]
+    HERMES["Hermes Agent :8642<br/>LLM, память, скиллы"]
+    SEARX["SearXNG :8080<br/>только builtin"]
+  end
+  YT["YouTube<br/>через SOCKS-туннель"]
+  RB["radio-browser.info"]
+  TG["Telegram"]
+  PUSH["Apple / FCM push"]
+
+  WW --> APP
+  REC --> APP
+  APP -- "POST /chat/text, /chat/audio" --> CADDY
+  CADDY -- "ssh -R 18000 → 8000" --> CORE
+  CORE -- "SSE /player/events" --> MUS
+  MUS --> APP
+  APP -- "GET /tts/chunk" --> CORE
+  CORE --> STT
+  CORE -- "POST /synth" --> TTSS
+  CORE -- "POST /v1/responses, stream" --> HERMES
+  HERMES -- "MCP /mcp: play_music, set_timer…" --> CORE
+  CORE --> YT
+  CORE --> RB
+  CORE --> TG
+  CORE --> PUSH --> SW
+      </pre></div>
+      <div class="tbl"><table>
+        <thead><tr><th>Процесс</th><th>Что делает</th><th>Код</th></tr></thead>
+        <tbody>
+          <tr><td>Браузер</td><td>Слышит «Джарвис», пишет команду, играет музыку и голос, показывает чат. Звук есть только здесь.</td><td class="m">web/src</td></tr>
+          <tr><td>jarvis-core</td><td>Распознаёт речь, решает, кому отдать реплику, ведёт ходы и очереди плееров, таймеры, MCP-сервер для Hermes, отдаёт звук.</td><td class="m">app/main.py</td></tr>
+          <tr><td>jarvis-tts</td><td>Держит в памяти модель Vosk и синтезирует речь. Отдельный процесс: модель грузится около 60 с.</td><td class="m">app/tts_server.py</td></tr>
+          <tr><td>Hermes</td><td>Думает над репликой: LLM, память о хозяине, скиллы. Музыку и таймеры включает через MCP-инструменты ядра.</td><td>внешний</td></tr>
+          <tr><td>jarvis-tunnel</td><td>SSH к point: SOCKS наружу (YouTube, Edge), проброс ядра и дашборда Hermes внутрь.</td><td class="m">scripts/systemd</td></tr>
+          <tr><td>jarvis-listener</td><td><span class="pill warn">выключен</span> Микрофон asus: openWakeWord → VAD → <code>/chat/audio</code>. Оставлен под будущую колонку.</td><td class="m">app/listener.py</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="scenario">
+      <h2>Сквозной пример: «Джарвис, включи музыку»</h2>
+      <p class="sub">Подробный разбор самого частого случая. «Включи музыку» без уточнений быстрый путь нарочно не берёт, потому что подбор «по вкусу» делает Hermes. Для «Включи Queen» шаги 6–9 заменяет быстрый путь (см. ниже), и ответ приходит за 1–4 с.</p>
+      <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Пользователь
+  participant W as Браузер<br/>(App + useWakeWord)
+  participant M as useMusic<br/>(SSE + audio)
+  participant C as jarvis-core<br/>(main.py, turns.py)
+  participant R as router.py
+  participant H as Hermes
+  participant P as Player(web)<br/>+ youtube.py
+  participant T as speech.py → jarvis-tts
+
+  U->>W: «Джарвис, включи музыку»
+  W->>W: WAKE найдено → сигнал «дин-дин», стоп голоса, music.hold()
+  Note over W: ждёт 1,8 с тишины распознавателя, команда = «включи музыку»
+  W->>C: POST /chat/text {detach, turn_id, device=web:…}
+  C-->>W: 200 {accepted}
+  C->>C: не «стоп» → turns.start → ждём до 12 с
+  C->>R: try_fast(«включи музыку»)
+  R-->>C: None (запрос «музыку» — пусть выберет Hermes)
+  C->>H: POST /v1/responses stream, conversation, VOICE_INSTRUCTIONS
+  H->>C: MCP play_music(query, kind=music)
+  C-->>M: SSE turn {tool: play_music} → «включаю»
+  C->>P: current_player() = браузер этого хода
+  P->>P: yt-dlp ytsearch5 → скачать трек в кэш (~3 с)
+  P-->>M: SSE state {src: media/yt/id, paused:false}
+  Note over M: трек загружен, но молчит — music удержана (held #gt; 0)
+  P->>P: фоном: YouTube Mix → +~25 похожих в очередь
+  H-->>C: response.completed «Включаю …»
+  C->>T: speak(reply) → куски → Vosk (упал → Piper)
+  C->>C: history.append (data/chat/default.jsonl)
+  C-->>M: SSE turn {reply, speech:{id,count}}
+  M->>W: onTurn → текст в чат
+  W->>C: GET /tts/chunk/id/0, 1…
+  W->>U: голос «Включаю …»
+  W->>M: music.release() → audio.play()
+  M->>U: музыка
+  M->>C: POST /player/report раз в 10 с, ended → следующий трек
+      </pre></div>
+
+      <h3>Те же шаги текстом, с файлами и развилками</h3>
+      <ol class="steps">
+        <li><div class="who">Слышит «Джарвис» — браузер <span class="m">useWakeWord.ts</span></div>
+          <div class="what">Встроенное распознавание браузера (на iPhone от Apple), <code>continuous</code>, <code>ru-RU</code>. Работает, только пока вкладка видна и не идёт запись. Регулярка ловит «джарвис / джервис / жарвис / jarvis…», команда — текст после последнего совпадения.<br><span class="fail">Нет Web Speech API — кнопки «Джарвис» нет, только тап. iOS запретил старт без жеста → кнопка «Нажми: «Джарвис»». Распознаватель передумал (слова уже нет) → onCancel, музыка возвращается.</span></div></li>
+        <li><div class="who">Реакция на слово — <span class="m">App.vue onAlert</span></div>
+          <div class="what">Сразу, не дожидаясь конца фразы: <code>interrupt()</code> обрывает текущую озвучку, <code>earcon.listen()</code> даёт сигнал, <code>music.hold()</code> ставит музыку на паузу (это счётчик, а не флаг).</div></li>
+        <li><div class="who">Конец команды — <span class="m">finishCommand</span></div>
+          <div class="what">1,8 с без новых результатов распознавателя (или 30 с максимум, или iOS сам закрыл сессию). Если есть текст — отправляется <b>текстом</b> через <code>sendText</code>, свой STT не нужен. Если сказали только «Джарвис» — включается запись.</div></li>
+        <li><div class="who">Отправка — <span class="m">api.ts → POST /chat/text</span></div>
+          <div class="what"><code>detach=true</code>: ядро сразу отвечает «принято», всё остальное придёт событиями SSE. <code>turn_id</code> генерирует браузер, <code>device=web:&lt;uuid&gt;</code> хранится в localStorage.<br><span class="fail">Запрос не дошёл → в чате «Сервер ответил …», музыка отпускается.</span></div></li>
+        <li><div class="who">Развилка хода — <span class="m">main.py _detach</span></div>
+          <div class="what">Пусто → «Не расслышал.» Реплика целиком «стоп/хватит/отмена/тихо…» → мгновенно без Hermes. Иначе <code>turns.start</code>: ход становится задачей, и параллельно диспетчер решает, какие идущие ходы он отменяет.</div></li>
+        <li><div class="who">Быстрый путь — <span class="m">router.py try_fast</span></div>
+          <div class="what">Правила на регулярках. «Включи музыку / что-нибудь» — нарочно <code>None</code>, дальше в Hermes. «Включи Queen» здесь же вызвал бы плеер.</div></li>
+        <li><div class="who">Думает — <span class="m">services/hermes.py</span></div>
+          <div class="what">Поток <code>/v1/responses</code>. Разговор <code>jarvis-voice-default-&lt;ts&gt;</code> начинается заново после 10 мин тишины. Если в нём уже идёт ход — параллельный разговор <code>…-p&lt;hex&gt;</code>. Каждый вызов инструмента → событие <code>tool</code> на экран.<br><span class="fail">502/503/504 или нет соединения до начала потока — повтор через 2, 4, 8 с. Оборванный поток не повторяется: инструменты могли уже сработать.</span></div></li>
+        <li><div class="who">Включает — <span class="m">mcp_server.py → devices.py → player.py</span></div>
+          <div class="what">Hermes вызывает MCP-инструмент отдельным HTTP-запросом и не знает устройства. Ядро помнит «чей сейчас ход» (<code>devices.turn</code>) и отдаёт плеер этого браузера. Хода нет (Telegram, cron) — последний браузер, где был Джарвис.<br><span class="fail">После рестарта ядра ни один браузер ещё не появлялся → «Не знаю, где включить: открой Джарвиса…»</span></div></li>
+        <li><div class="who">Находит и готовит звук — <span class="m">youtube.py, outputs.py WebOutput</span></div>
+          <div class="what">yt-dlp через SOCKS: 5 кандидатов, для музыки — от 1 до 15 минут. Короткое скачивается в <code>data/music/cache</code> (LRU, 2 ГБ), длинное идёт потоком (<code>/media/yt</code> или HLS для Safari). Браузеру уходит снимок состояния <code>{seq, src, start, paused}</code>.<br><span class="fail">Трек не загрузился — пропуск, до 3 подряд. Ничего не нашлось — «На YouTube ничего не нашлось».</span></div></li>
+        <li><div class="who">Озвучивает ответ — <span class="m">speech.py → tts.py → jarvis-tts</span></div>
+          <div class="what">Текст чистится (эмодзи, markdown), режется на куски: первый до 100 символов, каждый следующий не больше чем вдвое длиннее. Кусок 0 синтезируется сразу, следующий — пока звучит предыдущий.</div></li>
+        <li><div class="who">Доставляет — <span class="m">turns.emit → WebOutput.notify → SSE</span></div>
+          <div class="what">Событие <code>turn {reply, tools, speech:{id,count}}</code> с номером <code>&lt;boot&gt;:&lt;n&gt;</code>. Ответ пишется в историю вместе с <code>turn_id</code>.</div></li>
+        <li><div class="who">Говорит и возвращает музыку — <span class="m">App.vue speak → music.release</span></div>
+          <div class="what">Куски голоса играются по очереди, пока пользователь молчит. Потом <code>release()</code> → счётчик удержаний 0 → <code>audio.play()</code>. Трек закончился → <code>/player/report {ended}</code> → следующий из очереди (он уже скачан заранее).</div></li>
+      </ol>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="input">
+      <h2>Как начинается реплика</h2>
+      <p class="sub">Четыре входа. Во всех музыка удерживается от начала реплики до конца озвученного ответа.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  A(["Пользователь"]) --> B{"Как?"}
+  B -- "«Джарвис, #lt;команда#gt;»" --> W1["useWakeWord: alert<br/>стоп голоса, сигнал, music.hold"]
+  B -- "«Джарвис» и пауза" --> W1
+  B -- "тап по микрофону" --> T1["onTalk: стоп голоса, сигнал,<br/>music.hold, 250 мс паузы"]
+  B -- "текст в поле" --> X1["onSubmit: стоп голоса, music.hold"]
+  W1 --> W2{"через 1,8 с тишины:<br/>слово ещё в тексте?"}
+  W2 -- "нет — ложная тревога" --> REL["music.release, снова слушаю"]
+  W2 -- "да, есть команда" --> ST["sendText(command)"]
+  W2 -- "да, только имя" --> R1
+  T1 --> R1["useRecorder.start<br/>калибровка шума 300 мс"]
+  R1 --> R2{"автостоп"}
+  R2 -- "тишина 1,8 с после речи<br/>(2,5 с, если речи #lt; 1,5 с)<br/>или 45 с" --> SA["sendAudio(blob webm/mp4)"]
+  R2 -- "6 с без речи" --> CAN["сигнал «не расслышал»,<br/>music.release"]
+  R2 -- "повторный тап" --> SA
+  X1 --> ST
+  ST --> CORE[["POST /chat/text detach"]]
+  SA --> CORE2[["POST /chat/audio detach"]]
+      </pre></div>
+      <div class="grid2">
+        <div class="note"><h3>Кто делает STT</h3><p>После «Джарвис, команда» текст уже есть от распознавателя браузера — ядро получает текст. После тапа или «Джарвис» с паузой — запись уходит файлом, и распознаёт <code>faster-whisper medium/int8</code> на GTX 1050 (~1,6 с). Не поднялся на GPU — <code>small</code> на CPU.</p></div>
+        <div class="note"><h3>Перебивание</h3><p>«Джарвис» слышен и пока Джарвис думает, и пока говорит: голос замолкает, недосказанное выбрасывается (<code>speechGeneration</code>). Прошлый ход при этом не отменяется — решает диспетчер конфликтов.</p></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="core">
+      <h2>Ход в ядре</h2>
+      <p class="sub"><code>main.py _detach</code> для веба. Всё происходит в фоновой задаче, HTTP-запрос уже вернул «принято».</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  IN[["POST /chat/* detach"]] --> A{"аудио?"}
+  A -- "да" --> STT["stt.transcribe<br/>→ событие transcript"]
+  A -- "нет" --> E
+  STT --> E{"текст пустой?"}
+  E -- "да" --> NR["«Не расслышал.»"]
+  E -- "нет" --> S{"целиком «стоп»?<br/>is_just_stop"}
+  S -- "да" --> STOP["отменить ходы сессии на переднем плане<br/>плеер на паузу, «Хорошо.»"]
+  S -- "нет" --> START["turns.start: задача _answer"]
+  START -.-> CONF["_resolve: диспетчер конфликтов<br/>отменяет заменённые ходы"]
+  START --> BG{"«в фоне / потом расскажи /<br/>не спеши»?"}
+  BG -- "да" --> DEM
+  BG -- "нет" --> WAIT{"уложился в 12 с?"}
+  WAIT -- "да" --> FIN
+  WAIT -- "нет" --> DEM["demote: ход фоновый<br/>событие background + ack голосом<br/>«Это займёт время. Скажу, когда будет готово.»"]
+  DEM --> FIN["ждём итог хода"]
+  FIN --> O{"итог"}
+  O -- "отменён" --> CX["событие cancelled<br/>история: cancelled"]
+  O -- "исключение" --> ER["событие error «Не получилось: …»<br/>+ пуш, если экран свёрнут"]
+  O -- "ответ" --> OK["история + событие reply и speech<br/>фоновый и экран свёрнут → пуш"]
+  NR --> EV[("SSE turn")]
+  STOP --> EV
+  CX --> EV
+  ER --> EV
+  OK --> EV
+      </pre></div>
+      <div class="diagram"><pre class="mermaid">
+flowchart LR
+  A["_answer(text)"] --> F{"router.try_fast"}
+  F -- "FastReply" --> SP
+  F -- "None" --> D["with devices.turn(device)"]
+  D --> B{"AGENT_BACKEND"}
+  B -- "hermes" --> H["run_hermes"]
+  B -- "builtin" --> O["orchestrator.run_agent<br/>DeepSeek + web_search, web_fetch, music<br/>до 4 шагов"]
+  H --> SP["speech.speak(reply)"]
+  O --> SP
+      </pre></div>
+      <p class="caption">Озвучка — часть хода: «стоп» отменяет и долгий синтез. Фоновый ход «стоп» и новые реплики не трогают, только ✕ в чате.</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="router">
+      <h2>Быстрые команды без Hermes</h2>
+      <p class="sub"><code>router.py</code>. Только для браузера (у asus плеера нет). Текст нормализуется: нижний регистр, ё→е, без «Джарвис», «и / ну / пожалуйста» в начале. Правила нарочно узкие: сомнение → Hermes.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Фраза</th><th>Действие</th><th>В Hermes, если</th></tr></thead>
+        <tbody>
+          <tr><td>«пауза», «останови музыку»</td><td class="m">player.pause</td><td>—</td></tr>
+          <tr><td>«продолжи», «играй дальше»</td><td class="m">player.resume</td><td>—</td></tr>
+          <tr><td>«продолжи книгу»</td><td class="m">resume_listening</td><td>—</td></tr>
+          <tr><td>«дальше», «следующий трек», «другую»</td><td class="m">player.next</td><td>—</td></tr>
+          <tr><td>«предыдущий», «верни прошлую»</td><td class="m">player.previous</td><td>—</td></tr>
+          <tr><td>«громче» / «тише» / «громкость 30»</td><td class="m">volume ±15 / =N</td><td>—</td></tr>
+          <tr><td>«что играет», «что за песня»</td><td class="m">now_playing</td><td>—</td></tr>
+          <tr><td>«таймер на пять минут», «полчаса»</td><td class="m">timers.add</td><td>длительность не разобралась</td></tr>
+          <tr><td>«включи радио [джаз | Европа Плюс]»</td><td class="m">play_radio</td><td>станция не найдена</td></tr>
+          <tr><td>«включи / поставь / сыграй X»</td><td class="m">play_youtube(kind)</td><td>X — «музыку», «что-нибудь», свет, таймер…; «последний / новый выпуск»; ничего не нашлось</td></tr>
+          <tr><td>несколько просьб: «…, а потом…», «и сделай…»</td><td>—</td><td>всегда</td></tr>
+          <tr><td>исключение внутри быстрого пути</td><td>—</td><td>всегда (в лог)</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption">kind определяется словами: «книга» → audiobook, «подкаст / выпуск / лекция / новости» → podcast, иначе music.</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="hermes">
+      <h2>Hermes и MCP-инструменты</h2>
+      <p class="sub">Джарвис для Hermes — только «уши и рот». История разговора хранится в Hermes, ядро шлёт одну новую реплику и голосовые правила (<code>VOICE_INSTRUCTIONS</code>: 1–3 предложения, без markdown, числа словами, имена MCP-инструментов, чтобы не тратить шаг на tool_search).</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  S["run_hermes(session, text)"] --> C{"последняя реплика<br/>больше 10 мин назад?"}
+  C -- "да" --> N["новый разговор<br/>jarvis-voice-default-#lt;ts#gt;"]
+  C -- "нет" --> K["тот же разговор"]
+  N --> BUSY
+  K --> BUSY{"в нём уже идёт ход?"}
+  BUSY -- "да" --> PAR["параллельный разговор …-p#lt;hex#gt;<br/>без свежего контекста, зато сразу"]
+  BUSY -- "нет" --> MAIN["основной"]
+  PAR --> REQ
+  MAIN --> REQ["POST /v1/responses stream=true"]
+  REQ --> Q{"ответ"}
+  Q -- "502/503/504, нет соединения" --> RT["повтор через 2 → 4 → 8 с,<br/>потом ошибка"]
+  RT --> REQ
+  Q -- "поток" --> EV{"событие"}
+  EV -- "output_item.done function_call" --> TOOL["on_tool(имя) → «включаю / ищу…» на экране"]
+  TOOL --> EV
+  EV -- "completed / failed / incomplete" --> P["текст из output_text<br/>пусто → RuntimeError"]
+  EV -- "поток закрылся без финала" --> ERR["RuntimeError"]
+      </pre></div>
+      <div class="tbl"><table>
+        <thead><tr><th>MCP-инструмент</th><th>Что делает</th><th>Где звучит</th></tr></thead>
+        <tbody>
+          <tr><td class="m">play_music(query, kind, source)</td><td>YouTube (или локальная библиотека), для музыки — очередь похожих</td><td rowspan="6">браузер текущего хода, иначе последний; нет браузера → «Не знаю, где включить»</td></tr>
+          <tr><td class="m">resume_listening(query?)</td><td>Недослушанная книга или подкаст с места остановки −10 с</td></tr>
+          <tr><td class="m">play_radio(name, genre, cc)</td><td>radio-browser.info, топ-10 по кликам в очередь</td></tr>
+          <tr><td class="m">music_control(action, where)</td><td>pause / resume / stop / next / previous; <code>everywhere</code> — все плееры с очередью</td></tr>
+          <tr><td class="m">seek, set_volume</td><td>Перемотка; громкость (iPhone не даёт — честно отвечает)</td></tr>
+          <tr><td class="m">now_playing(where)</td><td>Что играет и 3 следующих</td></tr>
+          <tr><td class="m">set_timer, remind</td><td>Таймер или напоминание в <code>data/timers.json</code></td><td rowspan="2">на устройстве, где поставили (см. таймеры)</td></tr>
+          <tr><td class="m">announce(text)</td><td>Сказать вслух прямо сейчас</td></tr>
+          <tr><td class="m">list_timers, cancel_timer</td><td>Список, отмена по id или всех</td><td>—</td></tr>
+          <tr><td class="m">send_telegram(text)</td><td>Сообщение ботом Hermes напрямую (прокси point, запасной — IP Telegram)</td><td>Telegram</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="parallel">
+      <h2>Параллельные реплики и отмена</h2>
+      <p class="sub">Новая реплика не ждёт старые: сразу уходит в работу. Параллельно <code>conflicts.to_cancel</code> решает, какие из идущих (на переднем плане, той же сессии) она заменяет.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  N["новая реплика"] --> R{"есть идущие ходы<br/>на переднем плане?"}
+  R -- "нет" --> Z["ничего не отменяем"]
+  R -- "да" --> A{"начинается со «стоп / хватит /<br/>не надо / передумал / забудь»?"}
+  A -- "да" --> ALL["отменить все"]
+  A -- "нет" --> L{"LLM_API_KEY задан?"}
+  L -- "да" --> LLM["DeepSeek-диспетчер, 5 с<br/>{cancel:[номера]}"]
+  LLM -- "ответил" --> SEL["отменить выбранные"]
+  LLM -- "ошибка / таймаут" --> MED
+  L -- "нет" --> MED{"новая — «включи…»?"}
+  MED -- "да" --> OLD["отменить прошлые «включи…»"]
+  MED -- "нет" --> Z
+      </pre></div>
+      <ul class="plain">
+        <li>Отмена = <code>task.cancel()</code> → закрывается поток к Hermes → Hermes прерывает агента. Без потока он доделывал брошенное и включал музыку через минуту.</li>
+        <li>Реплика <em>целиком</em> «стоп» обрабатывается до всего этого, в <code>_detach</code>: отменить всё на переднем плане, пауза, «Хорошо.» (~0,7 с).</li>
+        <li>✕ в чате или в полоске фоновых задач → <code>POST /chat/cancel {turn_id}</code> — отменяет и фоновые.</li>
+        <li>Оборвался HTTP-запрос клиента — ход продолжается (<code>asyncio.wait</code>, а не <code>await task</code>).</li>
+      </ul>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="player">
+      <h2>Плеер: ядро решает, браузер играет</h2>
+      <p class="sub">Очередь, позиции и логика — на ядре (<code>Player</code>), по одному плееру на устройство. Браузер получает <em>снимок желаемого состояния</em>, а не команды: после обрыва SSE он просто сверяется с последним снимком.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  PY["play_youtube(query, kind)"] --> S["youtube.search: ytsearch5<br/>музыка 1–15 мин первыми,<br/>книга: + «аудиокнига», длинные первыми"]
+  S -- "пусто" --> NF["«На YouTube ничего не нашлось»<br/>(быстрый путь → Hermes)"]
+  S --> Q["_start_queue(3 кандидата)"]
+  Q --> L{"output.load(track)"}
+  L -- "ошибка" --> SK["следующий кандидат, до 3"]
+  SK --> L
+  L -- "ок" --> SRC{"какой src"}
+  SRC -- "короткое" --> DL["yt-dlp скачать в кэш<br/>src = media/yt/id"]
+  SRC -- "длинное, Chrome" --> ST["src = media/yt/id<br/>поток googlevideo с Range"]
+  SRC -- "длинное, Safari" --> HLS["src = media/hls/id/index.m3u8"]
+  SRC -- "радио https" --> RH["src = URL станции"]
+  SRC -- "радио http, локальный файл" --> REF["src = media/ref/token"]
+  DL --> SNAP
+  ST --> SNAP
+  HLS --> SNAP
+  RH --> SNAP
+  REF --> SNAP["SSE state {seq+1, src, start, paused}"]
+  SNAP --> BR["useMusic: audio.src, currentTime = start<br/>play, если wantPlaying и held = 0"]
+  BR --> REP["POST /player/report<br/>позиция раз в 10 с, пауза снаружи,<br/>ended / error, visible"]
+  REP -- "ended / error" --> NEXT["Player._on_end → следующий<br/>(скачан заранее) или очередь пуста"]
+  Q -. "kind=music, фоном" .-> MIX["YouTube Mix RD#lt;id#gt; → +~25 похожих"]
+      </pre></div>
+      <div class="grid2">
+        <div class="note"><h3>Длинное: книги, подкасты, треки &gt; 20 мин</h3><p>Позиция сохраняется на паузе, стопе, переключении и раз в 15 с в <code>data/positions.json</code>, общая для всех устройств. Старт — с места остановки минус 10 с. Ближе 30 с к концу — дослушано.</p></div>
+        <div class="note"><h3>iPhone</h3><p>Первый <code>play()</code> возможен только в жесте — любой тап «разблокирует» оба &lt;audio&gt; тишиной. Громкость меняется только кнопками. Длинное с YouTube — только HLS. В фоне Safari рвёт SSE.</p></div>
+        <div class="note"><h3>Ссылки googlevideo</h3><p>Привязаны к IP — поэтому и получение ссылки, и чтение идут через один SOCKS (<code>rdns=True</code>, <code>encoded=True</code>). 403 → ссылка берётся заново, второй раз 403 → 502.</p></div>
+        <div class="note"><h3>Кнопки на экране и экране блокировки</h3><p><code>POST /player/control</code>: pause, resume, next, previous, stop. Перемотку браузер делает сам и сообщает позицию отчётом.</p></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="voice">
+      <h2>Озвучка ответа</h2>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  R["reply"] --> C["tts.clean: без эмодзи, markdown, в одну строку"]
+  C --> SPL["speech._split по фразам<br/>куски: ≤100, ≤2× прошлого, ≤400"]
+  SPL --> J["job_id, count<br/>кусок 0 синтезируется сразу"]
+  J --> CL["клиент: GET /tts/chunk/id/n<br/>ядро заодно начинает n+1"]
+  CL --> SY["tts.synthesize(кусок)"]
+  SY --> AL{"есть буквы?"}
+  AL -- "нет" --> SIL["0,2 с тишины"]
+  AL -- "да" --> ENG{"TTS_ENGINE"}
+  ENG -- "vosk" --> V["speakable: числа прописью, латиница → кириллица,<br/>% → «процентов»<br/>POST jarvis-tts /synth, connect 2 с"]
+  ENG -- "edge" --> ED["Edge через SOCKS, 2 попытки по 20 с,<br/>до 3 кусков параллельно"]
+  ENG -- "piper" --> PI
+  V -- "ошибка / не поднят" --> PI["Piper CLI локально"]
+  ED -- "ошибка" --> PI
+  PI -- "нет файла голоса" --> X["исключение → ход падает с ошибкой"]
+      </pre></div>
+      <p class="caption">Куски живут 10 минут. Если пользователь перебил и клиент перестал их забирать, лишнее не синтезируется (опережение ровно на один кусок). Listener asus получает кусок 0 прямо в ответе base64, вебу — только id.</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="timers">
+      <h2>Таймеры, напоминания, объявления</h2>
+      <p class="sub">Ставятся быстрым путём («таймер на 5 минут») или MCP (<code>set_timer</code>, <code>remind</code>). Хранятся в <code>data/timers.json</code>, переживают рестарт; пропущенные не старше часа объявляются сразу с пометкой «Пропущенное напоминание».</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  F["таймер сработал / announce / фоновый ход listener"] --> A["speaker.announce(text, device)"]
+  A --> W{"device — браузер?"}
+  W -- "нет (asus)" --> TG
+  W -- "да" --> V{"экран открыт и виден?<br/>(есть SSE и visible)"}
+  V -- "нет" --> P["web push → sw.js → уведомление"]
+  V -- "да" --> CON
+  P --> CON{"браузер на связи?<br/>SSE или отчёт #lt; 45 с"}
+  CON -- "да" --> AN["ffmpeg: сигнал + фраза (×2 для таймера)<br/>SSE announce {url: media/ref/token}<br/>браузер: hold музыки → играет → release"]
+  CON -- "нет" --> PU{"пуш ушёл?"}
+  PU -- "да" --> DONE["«Экран свёрнут — прислал уведомление.»"]
+  PU -- "нет" --> TG["Telegram ботом Hermes"]
+  TG -- "ошибка" --> LOST["в лог: не дошло никак"]
+      </pre></div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="delivery">
+      <h2>Доставка ответа и обрывы связи</h2>
+      <p class="sub">Путь браузер → Caddy → SSH-туннель → ядро рвётся (свёрнутая вкладка, моргнувший туннель, рестарт ядра). Поэтому ответ не ждут в POST — он приходит нумерованными событиями.</p>
+      <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant B as Браузер (useMusic)
+  participant C as jarvis-core (WebOutput)
+  B->>C: GET /player/events?device&since=boot:n
+  C-->>B: state (снимок плеера)
+  C-->>B: пропущенные turn после n (не старше 10 мин, последние 200)
+  C-->>B: turns {active: идущие ходы устройства}
+  Note over B: принятый ход не в active и итога нет → ядро перезапускалось
+  B->>C: GET /chat/history
+  Note over B: нашёл по turn_id → показать ответ, нет → «Ответ потерялся, повтори»
+  Note over B,C: SSE упал с 5xx → переподключение через 3 с, пока вкладка видна
+  Note over C: другой boot в since → все события считаются новыми
+      </pre></div>
+      <ul class="plain">
+        <li>Досланный ответ старше 60 с показывается только текстом, без голоса.</li>
+        <li>Вкладку перезагрузили посреди хода — событие <code>turns</code> вернёт его в чат со спиннером.</li>
+        <li>Готовое при свёрнутой вкладке: для фоновых ходов и ошибок — пуш. Для обычного ответа пуша нет, он будет на экране при возврате.</li>
+        <li>Выкатка: <code>ExecStop → wait_idle.sh</code> ждёт <code>/admin/busy = 0</code> до 120 с, SSE закрываются через 5 с.</li>
+      </ul>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="failures">
+      <h2>Все сбои и что происходит</h2>
+      <div class="tbl"><table>
+        <thead><tr><th>Где</th><th>Сбой</th><th>Реакция</th></tr></thead>
+        <tbody>
+          <tr><td>Wake word</td><td>Нет разрешения / нет жеста на iOS</td><td><span class="pill warn">кнопка</span> «Нажми: «Джарвис»»</td></tr>
+          <tr><td>Wake word</td><td>iOS закрыл сессию (~минута тишины)</td><td>Перезапуск через 300 мс; посреди команды — берём, что успели</td></tr>
+          <tr><td>Запись</td><td>Нет доступа к микрофону</td><td>Ошибка в чате, музыка отпускается</td></tr>
+          <tr><td>Запись</td><td>6 с молчания</td><td>Нисходящий сигнал, запрос не отправляется</td></tr>
+          <tr><td>Сеть</td><td>POST не прошёл</td><td>«Сервер ответил …» в чате</td></tr>
+          <tr><td>STT</td><td>Пустой результат (шум)</td><td>«Не расслышал.» — в Hermes не идёт (пустой ввод даёт 500)</td></tr>
+          <tr><td>STT</td><td>GPU не поднялся</td><td><span class="pill ok">фоллбек</span> small на CPU</td></tr>
+          <tr><td>Быстрый путь</td><td>Исключение / не нашёл</td><td><span class="pill ok">фоллбек</span> Hermes</td></tr>
+          <tr><td>Hermes</td><td>Рестарт (503 draining, 502, нет соединения)</td><td>Повторы 2 / 4 / 8 с</td></tr>
+          <tr><td>Hermes</td><td>Обрыв потока, пустой ответ, 4xx</td><td><span class="pill bad">ошибка</span> «Не получилось: …», пуш если свёрнуто</td></tr>
+          <tr><td>Ход</td><td>Дольше 12 с</td><td>В фон: «Это займёт время…», по готовности — сигнал и голос / пуш</td></tr>
+          <tr><td>Диспетчер</td><td>LLM не ответил за 5 с</td><td>Правила: «включи» отменяет прошлые «включи»</td></tr>
+          <tr><td>MCP</td><td>Нет известного браузера</td><td>«Не знаю, где включить…»</td></tr>
+          <tr><td>Плеер</td><td>Трек не грузится / браузер не смог</td><td>Пропуск, до 3 подряд; ошибка при переходе — очередь очищается</td></tr>
+          <tr><td>YouTube</td><td>403 от googlevideo</td><td>Свежая ссылка, второй 403 → 502</td></tr>
+          <tr><td>Микс</td><td>Не получен</td><td>Играет один трек, в лог</td></tr>
+          <tr><td>TTS</td><td>jarvis-tts грузится / упал</td><td><span class="pill ok">фоллбек</span> Piper — голос другой, но есть</td></tr>
+          <tr><td>TTS</td><td>Vosk и Piper оба недоступны</td><td><span class="pill bad">ошибка</span> весь ход падает, текст ответа теряется</td></tr>
+          <tr><td>SSE</td><td>Обрыв</td><td>Досылка по since, восстановление по истории</td></tr>
+          <tr><td>Объявление</td><td>Экран закрыт</td><td>Пуш → Telegram</td></tr>
+          <tr><td>Пуш</td><td>404 / 410</td><td>Подписка удаляется</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="endpoints">
+      <h2>Эндпоинты ядра и файлы данных</h2>
+      <div class="tbl"><table>
+        <thead><tr><th>Путь</th><th>Кто зовёт</th><th>Зачем</th></tr></thead>
+        <tbody>
+          <tr><td class="m">POST /chat/text, /chat/audio</td><td>браузер, listener</td><td>Реплика. <code>detach</code> — только для web</td></tr>
+          <tr><td class="m">POST /chat/cancel</td><td>браузер ✕</td><td>Отменить ход или все ходы сессии</td></tr>
+          <tr><td class="m">GET /chat/history</td><td>браузер</td><td>Лента после перезагрузки и поиск потерянных</td></tr>
+          <tr><td class="m">GET /tts/chunk/{id}/{n}</td><td>браузер, listener</td><td>Кусок озвучки</td></tr>
+          <tr><td class="m">GET /player/events</td><td>браузер</td><td>SSE: state, seek, volume, announce, turn, turns</td></tr>
+          <tr><td class="m">POST /player/report, /player/control</td><td>браузер</td><td>Отчёт плеера, кнопки</td></tr>
+          <tr><td class="m">GET /media/yt, /media/hls, /media/ref</td><td>&lt;audio&gt;, mpv</td><td>Звук через ядро</td></tr>
+          <tr><td class="m">/push/key, /push/subscribe, /push/unsubscribe</td><td>браузер</td><td>Web Push</td></tr>
+          <tr><td class="m">POST /client/log</td><td>браузер</td><td>Диагностика wake word в журнал</td></tr>
+          <tr><td class="m">/mcp</td><td>Hermes</td><td><span class="pill warn">local only</span> MCP-инструменты</td></tr>
+          <tr><td class="m">/music/duck, unduck, state</td><td>listener</td><td><span class="pill warn">local only</span> плеер asus</td></tr>
+          <tr><td class="m">GET /admin/busy</td><td>wait_idle.sh</td><td><span class="pill warn">local only</span> сколько ходов идёт</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption">«local only» — запрос с заголовком <code>X-Forwarded-For</code> (через Caddy) получает 403.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Файл на asus</th><th>Что хранит</th></tr></thead>
+        <tbody>
+          <tr><td class="m">data/chat/&lt;session&gt;.jsonl</td><td>Лента чата для экрана (не контекст модели)</td></tr>
+          <tr><td class="m">data/timers.json</td><td>Таймеры и напоминания</td></tr>
+          <tr><td class="m">data/positions.json</td><td>Где остановились в длинном, до 200 записей</td></tr>
+          <tr><td class="m">data/push.json, data/vapid.pem</td><td>Подписки на пуши и ключ VAPID (пересоздашь — подписки заново)</td></tr>
+          <tr><td class="m">data/music/cache</td><td>Скачанные треки, LRU 2 ГБ</td></tr>
+          <tr><td class="m">в памяти ядра</td><td>Ходы, плееры, «чей ход», разговоры Hermes, куски озвучки, журнал событий SSE — пропадают при рестарте</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="legacy">
+      <h2>Listener asus (выключен)</h2>
+      <p class="sub">Путь для будущей колонки. Код рабочий, но после рефакторинга «asus — только сервер» его поведение расходится с остальной системой.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart LR
+  MIC["arecord plughw:0,0"] --> OWW["openWakeWord hey_jarvis<br/>порог 0,5"]
+  OWW --> DK["POST /music/duck"]
+  DK --> VAD["Silero VAD: 1,2 с тишины или 12 с"]
+  VAD -- "речи не было" --> UD["/music/unduck"]
+  VAD --> CA["POST /chat/audio device=asus<br/>ждёт ответ синхронно"]
+  CA --> PL["aplay кусок 0 + /tts/chunk"]
+  PL --> UD
+  CA -. "router: asus → None" .-> H["всегда Hermes"]
+  H -. "current_player()" .-> LW["музыка на последнем браузере"]
+  DK -. "пауза mpv asus,<br/>который ничего не играет" .-> X["расхождение"]
+      </pre></div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="findings">
+      <h2>Неточности и избыточность</h2>
+      <h3>Почищено</h3>
+      <ul class="plain">
+        <li><code>webpush.has_subscription</code> — не вызывался нигде, удалён.</li>
+        <li><code>usePlayer.play(base64)</code> — голос давно идёт только кусками по id, удалён.</li>
+        <li>Докстринги <code>timers.py</code>, <code>mcp_server.py</code>, <code>player.py</code> описывали звук через dmix на asus и listener как главного пользователя плеера — исправлены.</li>
+        <li><code>toolLabels.ts</code>: у встроенного агента <code>web_fetch</code> и <code>music</code> показывались сырыми именами — добавлены подписи.</li>
+        <li>README: устаревшие «Архитектура» (Piper, builtin как основной путь), «Статус» (нет sudo, нет ключа LLM), «Дальше» (таймеры и wake word уже сделаны), «таймер прозвучит на asus», «сигнал через dmix» — переписаны.</li>
+      </ul>
+      <h3>Оставлено на решение</h3>
+      <div class="grid2">
+        <div class="note hot"><h3>Listener и всё, что нужно только ему</h3><p><code>listener.py</code>, <code>jarvis-listener.service</code>, <code>MpvOutput</code> + <code>mpv.py</code>, <code>Player.duck/unduck</code>, <code>/music/*</code>, настройки <code>audio_output_device</code>, <code>mpv_socket</code>, <code>core_url</code>, синхронная ветка <code>/chat/*</code> с <code>audio_base64</code>. Если колонка не вернётся скоро — это ~400 строк на удаление. Если вернётся — сначала решить, где звучат её ходы.</p></div>
+        <div class="note hot"><h3>«Чей ход» — одна глобальная переменная</h3><p><code>devices._turn</code> один на всё ядро, а ходы идут параллельно. Две реплики с телефона и Mac одновременно — MCP-инструменты первой могут сыграть на втором устройстве. Пока пользователь один, риск низкий.</p></div>
+        <div class="note"><h3>Сбой TTS роняет ход целиком</h3><p><code>speech.speak</code> внутри хода: если Vosk недоступен и файла голоса Piper нет, ответ Hermes не попадает ни на экран, ни в историю. Можно ловить ошибку озвучки и отдавать текст без голоса.</p></div>
+        <div class="note"><h3>vite dev-прокси</h3><p><code>vite.config.ts</code> проксирует только <code>/chat</code> — в <code>npm run dev</code> не работают <code>/player</code>, <code>/tts</code>, <code>/push</code>, <code>/media</code>. Конфиг не трогал.</p></div>
+        <div class="note"><h3>Дефолты config.py ≠ прод</h3><p>В коде <code>builtin / piper / small cpu</code>, в <code>.env.example</code> — <code>hermes / vosk / medium cuda</code>. Как фоллбек нормально, но комментарий «small/int8, 2 ГБ узковаты» уже не про то, что работает.</p></div>
+        <div class="note"><h3>Мелочи</h3><p>Пустой чат пишет «Разговор общий с Джарвисом дома» — про listener. <code>/player/control seek</code> клиент не использует. Цикл <code>_edge_with_retry</code> через <code>range(1, 2)</code> делает 2 попытки, но читается тяжело.</p></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+  (function () {
+    if (!window.mermaid) return;
+    var css = getComputedStyle(document.documentElement);
+    var v = function (name) { return css.getPropertyValue(name).trim(); };
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'base',
+      flowchart: { curve: 'basis', htmlLabels: true, useMaxWidth: true },
+      sequence: { useMaxWidth: true, mirrorActors: false },
+      themeVariables: {
+        fontFamily: 'IBM Plex Sans, -apple-system, sans-serif',
+        fontSize: '14px',
+        background: v('--surface'),
+        primaryColor: v('--sunken'),
+        primaryTextColor: v('--ink'),
+        primaryBorderColor: v('--line'),
+        secondaryColor: v('--accent-soft'),
+        tertiaryColor: v('--surface'),
+        lineColor: v('--ink-dim'),
+        textColor: v('--ink'),
+        clusterBkg: v('--ground'),
+        clusterBorder: v('--line'),
+        edgeLabelBackground: v('--surface'),
+        actorBkg: v('--accent-soft'),
+        actorBorder: v('--accent'),
+        actorTextColor: v('--ink'),
+        signalColor: v('--ink'),
+        signalTextColor: v('--ink'),
+        noteBkgColor: v('--warn-soft'),
+        noteTextColor: v('--ink'),
+        noteBorderColor: v('--warn'),
+        labelBoxBkgColor: v('--sunken'),
+        sequenceNumberColor: v('--surface')
+      }
+    });
+    // Не ждём load (шрифты): диаграммы рисуются сразу.
+    mermaid.run({ querySelector: 'pre.mermaid' });
+  })();
+</script>

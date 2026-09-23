@@ -42,14 +42,10 @@ export function usePlayer() {
     })
   }
 
-  function play(base64Wav: string): Promise<void> {
-    return playUrl(`data:audio/wav;base64,${base64Wav}`)
-  }
-
   function stop(): void {
     audio.pause()
     done()
   }
 
-  return { isPlaying, unlock, play, playUrl, stop }
+  return { isPlaying, unlock, playUrl, stop }
 }

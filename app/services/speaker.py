@@ -1,13 +1,10 @@
 """Ядро говорит само, без запроса пользователя: таймеры, напоминания,
 объявления от Hermes cron.
 
-asus: играет через тот же dmix, что mpv и listener, — поэтому звучит поверх
-чего угодно; музыку на время объявления ставим на паузу тем же duck/unduck,
-что и при голосовой команде.
-
-Веб: сигнал+фраза склеиваются в один wav, браузеру уходит событие announce
-со ссылкой, музыку он приглушает сам. Если браузер не на связи (iOS усыпляет
-вкладку в фоне) — объявление звучит на asus, чтобы не потерялось.
+Звучит только на устройстве пользователя (телефон, Mac): сигнал+фраза
+склеиваются в один wav, браузеру уходит событие announce со ссылкой, музыку
+он приглушает сам. asus — сервер, у него звука нет: браузер не на связи
+(iOS усыпляет вкладку в фоне) — пуш, а без подписки на пуши — Telegram.
 """
 
 from __future__ import annotations
@@ -21,15 +18,12 @@ import uuid
 import wave
 from pathlib import Path
 
-from app.config import settings
 from app.music import devices, media
-from app.services import tts, webpush
+from app.services import telegram, tts, webpush
 
 logger = logging.getLogger("jarvis.speaker")
 
 _CHIME_RATE = 24000
-# Объявления не должны перебивать друг друга (два таймера на одну минуту).
-_lock = asyncio.Lock()
 
 
 def _chime_path() -> Path:
@@ -51,29 +45,27 @@ def _chime_path() -> Path:
     return path
 
 
-async def _play(path: Path) -> None:
-    # plug: — ресемплинг под фиксированный формат dmix.
-    proc = await asyncio.create_subprocess_exec(
-        "aplay", "-q", "-D", f'plug:"{settings.audio_output_device}"', str(path),
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, err = await proc.communicate()
-    if proc.returncode != 0:
-        logger.warning("aplay: %s", err.decode(errors="replace").strip())
-
-
 async def announce(text: str, device: str = devices.ASUS, chime: bool = True, repeat: int = 1) -> str:
-    """Возвращает устройство, на котором реально прозвучало. Вкладка веба
-    свёрнута — вдобавок пуш: на экране блокировки видно, что сработало."""
-    if device != devices.ASUS and not devices.web_output(device).watching:
-        await webpush.notify(device, "Джарвис", text)
-    if device != devices.ASUS and devices.web_output(device).connected:
+    """Как дошло — фраза для ответа инструмента.
+
+    asus — только сервер, не звучит: экран открыт → звук там; свёрнут → пуш;
+    подписки на пуши нет или устройство неизвестно → сообщение в Telegram,
+    чтобы таймер/напоминание не потерялись."""
+    web = devices.is_web(device)
+    pushed = 0
+    if web and not devices.web_output(device).watching:
+        pushed = await webpush.notify(device, "Джарвис", text)
+    if web and devices.web_output(device).connected:
         await _announce_web(text, device, chime, repeat)
-        return device
-    if device != devices.ASUS:
-        logger.info("%s не на связи — объявляю на asus", device)
-    await _announce_asus(text, chime, repeat)
-    return devices.ASUS
+        return "Сказал."
+    if pushed:
+        return "Экран свёрнут — прислал уведомление."
+    try:
+        await telegram.send(text)
+        return "Устройство не на связи — написал в Telegram."
+    except Exception:
+        logger.exception("Не дошло ни пушем, ни в Telegram: %s", text)
+        return "Не получилось доставить: устройство не на связи, Telegram недоступен."
 
 
 async def _announce_web(text: str, device: str, chime: bool, repeat: int) -> None:
@@ -92,20 +84,3 @@ async def _announce_web(text: str, device: str, chime: bool, repeat: int) -> Non
     devices.web_output(device).announce(f"media/ref/{media.register(str(out))}")
     # Браузер заберёт файл за секунды; через 10 минут он уже не нужен.
     asyncio.get_running_loop().call_later(600, lambda: out.unlink(missing_ok=True))
-
-
-async def _announce_asus(text: str, chime: bool, repeat: int) -> None:
-    player = devices.player_for(devices.ASUS)
-    async with _lock:
-        with tempfile.NamedTemporaryFile(suffix=".wav") as speech:
-            await tts.synthesize(text, Path(speech.name))
-            await player.duck()
-            try:
-                for i in range(repeat):
-                    if i:
-                        await asyncio.sleep(1.5)
-                    if chime:
-                        await _play(_chime_path())
-                    await _play(Path(speech.name))
-            finally:
-                await player.unduck()

@@ -123,6 +123,8 @@ async def try_fast(text: str, device: str) -> FastReply | None:
 
 
 async def _try_fast(text: str, device: str) -> FastReply | None:
+    if not devices.is_web(device):
+        return None  # asus — сервер, играть там нечему; пусть ответит Hermes
     t = _normalize(text)
     if _COMPOUND.search(t):
         return None
