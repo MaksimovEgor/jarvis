@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from app.music.player import player
+from app.music import devices
 
 SCHEMA = {
     "type": "function",
@@ -38,6 +38,7 @@ SCHEMA = {
 
 async def run(arguments: dict) -> str:
     action = arguments["action"]
+    player = devices.current_player()
     if action == "play":
         source = arguments.get("source", "youtube")
         query = arguments.get("query", "")

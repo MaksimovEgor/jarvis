@@ -1,127 +1,297 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import { sendAudio, sendText, type ChatReply } from './api'
+import { cancelTurn, fetchHistory, sendAudio, sendText, type ChatReply } from './api'
 import ChatLog from './components/ChatLog.vue'
+import PlayerBar from './components/PlayerBar.vue'
 import TalkButton from './components/TalkButton.vue'
+import { useEarcon } from './composables/useEarcon'
+import { useMusic } from './composables/useMusic'
 import { usePlayer } from './composables/usePlayer'
 import { useRecorder } from './composables/useRecorder'
-import type { Message, Status } from './types'
-
-const SPEAK_KEY = 'jarvis:speakText'
+import { useWakeWord } from './composables/useWakeWord'
+import type { Message, Status, TurnEvent } from './types'
 
 const recorder = useRecorder()
 const player = usePlayer()
+const earcon = useEarcon()
+// Объявления таймеров играет голосовой плеер, музыка на это время молчит.
+const music = useMusic((url) => player.playUrl(url), onTurn)
+const {
+  title: musicTitle,
+  wantPlaying: musicPlaying,
+  isLoading: musicLoading,
+  live: musicLive,
+  position: musicPosition,
+  duration: musicDuration,
+} = music
+
+// «Джарвис» слышен всегда, кроме момента записи команды: и пока Джарвис
+// думает над прошлой просьбой, и пока говорит (голос тогда замолкает).
+const wake = useWakeWord({
+  onAlert: () => {
+    interrupt()
+    earcon.listen()
+    music.hold()
+  },
+  onWake: (command) => {
+    if (command) {
+      void ask((turnId) => sendText(command, true, turnId), command)
+      // Статус мог не смениться (уже «думаю») — снова слушать явно.
+      syncWake()
+    } else {
+      void startRecording()
+    }
+  },
+  onCancel: () => music.release(),
+})
 
 const messages = ref<Message[]>([])
-const isThinking = ref(false)
 const draft = ref('')
-const speakText = ref(readSpeakPref())
+// Реплик в работе может быть несколько: новая не ждёт старые, а ядро само
+// отменяет те, что она заменяет (app/turns.py).
+const pending = ref(0)
 
 let nextId = 1
 
+// После перезагрузки чат на месте: история хранится на ядре (app/history.py).
+void fetchHistory().then((entries) => {
+  const restored: Message[] = []
+  for (const e of entries) {
+    restored.push({ id: nextId++, role: 'user', text: e.user, cancelled: e.cancelled })
+    if (e.reply) restored.push({ id: nextId++, role: 'assistant', text: e.reply, tools: e.tools })
+  }
+  messages.value = [...restored, ...messages.value]
+})
+
+// Прогресс просьбы: какой инструмент сейчас работает.
+function onTurn(event: TurnEvent): void {
+  const msg = messages.value.find((m) => m.pending?.turnId === event.id)
+  if (!msg?.pending) return
+  if (event.cancelled) {
+    msg.pending = undefined
+    msg.cancelled = true
+  } else if (event.tool) {
+    msg.pending.tool = event.tool
+  }
+}
+
+function onCancel(turnId: string): void {
+  void cancelTurn(turnId).catch((e) => push('error', errorText(e)))
+}
+
 const status = computed<Status>(() => {
   if (recorder.isRecording.value) return 'recording'
-  if (isThinking.value) return 'thinking'
   if (player.isPlaying.value) return 'speaking'
+  if (pending.value > 0) return 'thinking'
   return 'idle'
 })
 
-watch(speakText, (v) => {
-  try {
-    localStorage.setItem(SPEAK_KEY, v ? '1' : '0')
-  } catch {
-    // приватный режим — настройка просто не запомнится
-  }
+const placeholder = computed(() => {
+  if (status.value === 'recording') return 'Слушаю…'
+  if (wake.enabled.value && !wake.blocked.value) return 'Скажи «Джарвис» или напиши…'
+  return 'Написать…'
 })
 
-async function onTalk(): Promise<void> {
-  if (status.value === 'speaking') {
-    player.stop()
-    return
+function syncWake(): void {
+  if (status.value !== 'recording' && document.visibilityState === 'visible') wake.resume()
+  else wake.pause()
+}
+watch(status, syncWake, { immediate: true })
+document.addEventListener('visibilitychange', syncWake)
+
+// --- озвучка ответов: по очереди, и только когда пользователь не говорит ---
+
+interface Speech {
+  audio: string
+  done: () => void
+}
+const speechQueue: Speech[] = []
+let draining = false
+
+function speak(audio: string): Promise<void> {
+  return new Promise((done) => {
+    speechQueue.push({ audio, done })
+    void drainSpeech()
+  })
+}
+
+async function drainSpeech(): Promise<void> {
+  if (draining) return
+  draining = true
+  while (speechQueue.length && !recorder.isRecording.value) {
+    const next = speechQueue.shift()!
+    await player.play(next.audio)
+    next.done()
   }
-  if (status.value === 'recording') {
-    const blob = await recorder.stop()
-    await ask(() => sendAudio(blob))
-    return
-  }
+  draining = false
+}
+
+// Пользователь заговорил — Джарвис замолкает, недосказанное не досказывает.
+function interrupt(): void {
+  for (const s of speechQueue.splice(0)) s.done()
+  player.stop()
+}
+
+// Любой тап — шанс разблокировать звук на iOS (он разрешает только в жесте).
+function unlockAudio(): void {
   player.unlock()
+  music.unlock()
+  earcon.unlock()
+}
+
+function onWakeToggle(): void {
+  unlockAudio()
+  wake.setEnabled(wake.blocked.value || !wake.enabled.value)
+}
+
+// Одна кнопка: есть текст в поле — отправить его, нет — говорить голосом.
+function onPress(): void {
+  void (draft.value.trim() ? onSubmit() : onTalk())
+}
+
+async function onTalk(): Promise<void> {
+  if (status.value === 'recording') {
+    await finishRecording()
+    return
+  }
+  // В любом другом состоянии — сразу слушать, как у Алисы.
+  interrupt()
+  unlockAudio()
+  earcon.listen()
+  // Музыка молчит от начала записи до конца ответа.
+  music.hold()
+  // Сигнал не должен попасть в калибровку шума автостопа.
+  await new Promise((r) => setTimeout(r, 250))
+  await startRecording()
+}
+
+// Музыка к этому моменту уже удержана (тап или «Джарвис»).
+async function startRecording(): Promise<void> {
+  wake.pause()
   try {
-    await recorder.start()
+    await recorder.start({
+      onEnd: () => void finishRecording(),
+      onNoSpeech: () => void cancelRecording(),
+    })
   } catch (e) {
+    music.release()
     push('error', `Нет доступа к микрофону: ${errorText(e)}`)
   }
 }
 
-async function onSubmit(): Promise<void> {
-  const text = draft.value.trim()
-  if (!text || isThinking.value) return
-  draft.value = ''
-  if (speakText.value) player.unlock()
-  push('user', text)
-  await ask(() => sendText(text, speakText.value))
+async function finishRecording(): Promise<void> {
+  if (!recorder.isRecording.value) return
+  const blob = await recorder.stop()
+  void drainSpeech()
+  await ask((turnId) => sendAudio(blob, turnId), null)
 }
 
-async function ask(request: () => Promise<ChatReply>): Promise<void> {
-  isThinking.value = true
+async function cancelRecording(): Promise<void> {
+  if (!recorder.isRecording.value) return
+  await recorder.stop()
+  earcon.cancel()
+  music.release()
+  void drainSpeech()
+}
+
+async function onSubmit(): Promise<void> {
+  const text = draft.value.trim()
+  if (!text) return
+  draft.value = ''
+  interrupt()
+  unlockAudio()
+  music.hold()
+  await ask((turnId) => sendText(text, true, turnId), text)
+}
+
+// Одна реплика. text=null — голос: текст придёт с ответом (расшифровка).
+// Музыка удержана вызывающим; отпускается, когда ответ доозвучен.
+async function ask(request: (turnId: string) => Promise<ChatReply>, text: string | null): Promise<void> {
+  const turnId = crypto.randomUUID()
+  const mine = push('user', text ?? '…')
+  mine.pending = { turnId, since: Date.now() }
+  pending.value += 1
   try {
-    const res = await request()
-    if (res.transcript !== undefined) {
-      push('user', res.transcript || '(не расслышал)')
+    const res = await request(turnId)
+    mine.pending = undefined
+    if (res.transcript !== undefined) mine.text = res.transcript || '(не расслышал)'
+    if (res.cancelled) {
+      mine.cancelled = true
+      return
     }
     push('assistant', res.reply, res.tool_calls)
     if (res.audio_base64) {
-      await player.play(res.audio_base64)
+      pending.value -= 1
+      await speak(res.audio_base64)
+      pending.value += 1
     }
   } catch (e) {
     push('error', errorText(e))
   } finally {
-    isThinking.value = false
+    mine.pending = undefined
+    pending.value -= 1
+    music.release()
   }
 }
 
-function push(role: Message['role'], text: string, tools?: string[]): void {
+function push(role: Message['role'], text: string, tools?: string[]): Message {
   messages.value.push({ id: nextId++, role, text, tools })
+  // Возвращаем реактивную копию — правки текста видны в ленте.
+  return messages.value[messages.value.length - 1]
 }
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
-}
-
-function readSpeakPref(): boolean {
-  try {
-    return localStorage.getItem(SPEAK_KEY) === '1'
-  } catch {
-    return false
-  }
 }
 </script>
 
 <template>
   <main class="app">
     <header class="app__header">
-      <span class="app__dot" :class="`app__dot--${status}`" />
+      <span
+        class="app__dot"
+        :class="[`app__dot--${status}`, { 'app__dot--wake': status === 'idle' && wake.listening.value }]"
+      />
       Джарвис
+      <button
+        v-if="wake.supported"
+        class="app__wake"
+        :class="{ 'app__wake--on': wake.enabled.value && !wake.blocked.value }"
+        :title="wake.blocked.value ? 'Нажми, чтобы снова слушать «Джарвис»' : 'Откликаться на «Джарвис»'"
+        @click="onWakeToggle"
+      >
+        {{ wake.blocked.value ? 'Нажми: «Джарвис»' : '«Джарвис»' }}
+      </button>
     </header>
 
-    <ChatLog :messages="messages" />
+    <PlayerBar
+      v-if="musicTitle !== null"
+      :title="musicTitle"
+      :playing="musicPlaying"
+      :loading="musicLoading"
+      :live="musicLive"
+      :position="musicPosition"
+      :duration="musicDuration"
+      @toggle="music.toggle"
+      @next="music.next"
+      @previous="music.previous"
+      @stop="music.stop"
+      @seek="music.seek"
+    />
+
+    <ChatLog :messages="messages" @cancel="onCancel" />
 
     <footer class="app__footer">
-      <TalkButton :status="status" @press="onTalk" />
-
       <form class="app__form" @submit.prevent="onSubmit">
         <input
           v-model="draft"
           class="app__input"
           type="text"
-          placeholder="Написать…"
+          :placeholder="placeholder"
           enterkeyhint="send"
-          :disabled="isThinking"
         />
-        <label class="app__speak" title="Озвучивать ответы на текст">
-          <input v-model="speakText" type="checkbox" />
-          🔊
-        </label>
+        <TalkButton :status="status" :send="draft.trim().length > 0" @press="onPress" />
       </form>
     </footer>
   </main>
@@ -158,19 +328,41 @@ function readSpeakPref(): boolean {
     &--thinking {
       background: var(--warn);
     }
+
+    // Ждёт «Джарвис» — медленно «дышит».
+    &--wake {
+      animation: wake 2.4s ease-in-out infinite;
+    }
+  }
+
+  &__wake {
+    margin-left: auto;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+
+    &--on {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
   }
 
   &__footer {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--border);
   }
 
   &__form {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    gap: 10px;
   }
 
   &__input {
@@ -189,19 +381,11 @@ function readSpeakPref(): boolean {
       outline-offset: -1px;
     }
   }
+}
 
-  &__speak {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 0 10px;
-    border-radius: 14px;
-    background: var(--surface);
-    cursor: pointer;
-
-    input {
-      accent-color: var(--accent);
-    }
+@keyframes wake {
+  50% {
+    opacity: 0.35;
   }
 }
 </style>

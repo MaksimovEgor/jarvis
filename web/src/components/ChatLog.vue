@@ -1,11 +1,63 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 
 import type { Message } from '../types'
 
 const props = defineProps<{ messages: Message[] }>()
+const emit = defineEmits<{ cancel: [turnId: string] }>()
 
 const log = ref<HTMLElement | null>(null)
+
+// Что делает Джарвис — по-человечески, а не именами инструментов.
+const TOOL_LABELS: Record<string, string> = {
+  play_music: 'включаю',
+  play_radio: 'включаю радио',
+  resume_listening: 'включаю',
+  web_search: 'ищу в интернете',
+  web_extract: 'читаю страницу',
+  terminal: 'выполняю команду',
+  execute_code: 'считаю',
+  skill_view: 'вспоминаю, как это делать',
+  tool_search: 'выбираю инструмент',
+  tool_describe: 'выбираю инструмент',
+  cronjob_manage: 'планирую задачу',
+  send_telegram: 'отправляю в Telegram',
+  session_search: 'вспоминаю',
+  memory: 'запоминаю',
+  read_file: 'читаю файл',
+  search_files: 'ищу файлы',
+  set_timer: 'ставлю таймер',
+  remind: 'ставлю напоминание',
+}
+
+function toolLabel(tool?: string): string {
+  if (!tool) return 'думаю'
+  const name = tool.replace(/^mcp__\w+?__/, '')
+  return TOOL_LABELS[name] ?? name
+}
+
+// Секундомер для выполняющихся просьб — тикает, только пока они есть.
+const now = ref(Date.now())
+const hasPending = computed(() => props.messages.some((m) => m.pending))
+let ticker: number | null = null
+watch(
+  hasPending,
+  (active) => {
+    if (active && ticker === null) {
+      ticker = window.setInterval(() => (now.value = Date.now()), 1000)
+    } else if (!active && ticker !== null) {
+      clearInterval(ticker)
+      ticker = null
+    }
+  },
+  { immediate: true },
+)
+onUnmounted(() => ticker !== null && clearInterval(ticker))
+
+function elapsed(since: number): string {
+  const s = Math.max(0, Math.floor((now.value - since) / 1000))
+  return s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин ${s % 60} с`
+}
 
 watch(
   () => props.messages.length,
@@ -21,9 +73,22 @@ watch(
     <p v-if="!messages.length" class="log__empty">
       Спроси что-нибудь голосом или текстом.<br />Разговор общий с Джарвисом дома.
     </p>
-    <article v-for="m in messages" :key="m.id" class="log__msg" :class="`log__msg--${m.role}`">
+    <article
+      v-for="m in messages"
+      :key="m.id"
+      class="log__msg"
+      :class="[`log__msg--${m.role}`, { 'log__msg--cancelled': m.cancelled }]"
+    >
       {{ m.text }}
-      <small v-if="m.tools?.length" class="log__tools">{{ m.tools.join(' · ') }}</small>
+      <small v-if="m.cancelled" class="log__tools">отменено</small>
+      <small v-else-if="m.pending" class="log__pending">
+        <span class="log__spinner" />
+        {{ elapsed(m.pending.since) }} · {{ toolLabel(m.pending.tool) }}
+        <button class="log__cancel" type="button" aria-label="Отменить" @click="emit('cancel', m.pending.turnId)">
+          ✕
+        </button>
+      </small>
+      <small v-else-if="m.tools?.length" class="log__tools">{{ m.tools.join(' · ') }}</small>
     </article>
   </section>
 </template>
@@ -57,12 +122,22 @@ watch(
       background: var(--accent);
       color: var(--bg);
       border-bottom-right-radius: 6px;
+
+      // Серый на бирюзовом не читается — подписи цветом текста пузыря.
+      .log__tools {
+        color: inherit;
+        opacity: 0.7;
+      }
     }
 
     &--assistant {
       align-self: flex-start;
       background: var(--surface);
       border-bottom-left-radius: 6px;
+    }
+
+    &--cancelled {
+      opacity: 0.5;
     }
 
     &--error {
@@ -72,11 +147,46 @@ watch(
     }
   }
 
+  &__pending {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    font-size: 12px;
+    opacity: 0.8;
+  }
+
+  &__spinner {
+    width: 10px;
+    height: 10px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  &__cancel {
+    margin-left: 4px;
+    padding: 2px 8px;
+    border: none;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 18%, transparent);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
   &__tools {
     display: block;
     margin-top: 6px;
     font-size: 11px;
     color: var(--text-dim);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 </style>

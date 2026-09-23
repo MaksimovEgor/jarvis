@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app.music import devices
 from app.services import speaker
 
 logger = logging.getLogger("jarvis.timers")
@@ -33,6 +34,8 @@ class Alarm:
     id: str
     due: float  # unix time
     text: str
+    # Где звенеть — там, где поставили (телефон/asus).
+    device: str = devices.ASUS
 
     @property
     def due_local(self) -> str:
@@ -69,7 +72,7 @@ class Timers:
             text = f"Пропущенное напоминание: {text}"
         logger.info("Сработал %s: %s", alarm.id, text)
         try:
-            await speaker.announce(text, repeat=2)
+            await speaker.announce(text, device=alarm.device, repeat=2)
         except Exception:
             logger.exception("Не получилось объявить %s", alarm.id)
         finally:
@@ -77,8 +80,8 @@ class Timers:
             self._tasks.pop(alarm.id, None)
             self._save()
 
-    def add(self, due: float, text: str) -> Alarm:
-        alarm = Alarm(id=uuid.uuid4().hex[:6], due=due, text=text)
+    def add(self, due: float, text: str, device: str = devices.ASUS) -> Alarm:
+        alarm = Alarm(id=uuid.uuid4().hex[:6], due=due, text=text, device=device)
         self._schedule(alarm)
         self._save()
         return alarm

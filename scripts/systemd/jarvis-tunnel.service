@@ -1,5 +1,5 @@
 [Unit]
-Description=Jarvis туннель на VPS point: SOCKS наружу (Edge TTS, YouTube) и веб-интерфейс внутрь
+Description=Jarvis туннель на VPS point: SOCKS наружу (Edge TTS, YouTube) и веб-интерфейсы Jarvis/Hermes внутрь
 After=network-online.target
 
 [Service]
@@ -8,7 +8,10 @@ Type=simple
 # -D: SOCKS на asus → выход в интернет через point (Edge TTS, YouTube).
 # -R: ядро Jarvis видно на point как 127.0.0.1:18000 — туда проксирует Caddy
 #     (https://point.abrdns.com:8446/). Порт только на loopback point.
+# -R: дашборд Hermes (127.0.0.1:9119) — на point 127.0.0.1:19119
+#     (https://point.abrdns.com:8447/, вход по паролю самого Hermes).
 ExecStart=/usr/bin/ssh -N -D 127.0.0.1:1080 -R 127.0.0.1:18000:127.0.0.1:8000 \
+    -R 127.0.0.1:19119:127.0.0.1:9119 \
     -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
     -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     root@2.26.88.227

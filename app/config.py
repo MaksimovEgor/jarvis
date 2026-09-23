@@ -20,9 +20,10 @@ class Settings(BaseSettings):
     agent_backend: Literal["hermes", "builtin"] = "builtin"
     hermes_url: str = "http://127.0.0.1:8642"
     hermes_api_key: str = ""
-    hermes_timeout: float = 120.0  # агентный ход с инструментами бывает долгим
     # Столько минут тишины — и голосовой разговор начинается с чистой истории.
     hermes_conversation_idle_minutes: int = 10
+    # Отсюда берутся токен бота и чат для «пришли мне в Telegram».
+    hermes_env_file: str = "~/.hermes/.env"
 
     # STT — faster-whisper локально на asus (2GB VRAM у GTX 1050 узковаты
     # для large, поэтому small/int8; CPU-фоллбек тоже тянет small в реальном
@@ -58,6 +59,8 @@ class Settings(BaseSettings):
     music_cache_dir: str = "data/music/cache"
     music_cache_max_mb: int = 2048
     radio_browser_url: str = "https://de1.api.radio-browser.info"
+    # Адрес самого ядра для mpv: длинное с YouTube он берёт потоком из /media/yt.
+    core_url: str = "http://127.0.0.1:8000"
 
     session_history_limit: int = 20
 

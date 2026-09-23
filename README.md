@@ -139,6 +139,91 @@ listener ──POST /music/duck|unduck ─┘     ├ очередь: трек +
   `HERMES_CONVERSATION_IDLE_MINUTES` (10) минут тишины: бессрочная история
   разрослась до ~370k токенов на реплику.
 
+## Устройства: музыка звучит там, где попросили
+
+```
+веб (телефон/Mac) ─ /chat/* device=web:<id> ─┐
+listener (asus) ── /chat/audio (device=asus) ─┼─► devices.turn(): «чей ход»
+Telegram/cron Hermes ── хода Jarvis нет ──────┘        │
+Hermes ─MCP─► devices.current_player() ◄───────────────┘
+   asus     → Player(MpvOutput)  — mpv; короткое из кэша, длинное потоком /media/yt
+   web:<id> → Player(WebOutput)  — SSE /player/events → <audio> в браузере,
+                                   браузер шлёт /player/report (позиция, конец трека)
+```
+
+- `/media/yt/<id>` — из кэша или потоком googlevideo через туннель с Range
+  (Safari без Range не играет и не перематывает). `/media/ref/<token>` —
+  http-радио, локальные файлы, объявления.
+- Книги/подкасты (`kind`, или трек длиннее 20 минут) продолжаются с места
+  остановки минус 10 с, позиции общие для всех устройств: `data/positions.json`.
+- Веб сам ставит музыку на паузу от начала записи до конца озвученного ответа
+  и на время объявления таймера. На iPhone первый `play()` разблокируется
+  тапом, громкость меняется только кнопками, в фоне Safari рвёт SSE —
+  таймер в этом случае прозвучит на asus.
+- Длинное с YouTube Safari получает как HLS (`/media/hls/<id>/index.m3u8`):
+  DASH-m4a, который отдаёт YouTube, iPhone не играет (код 4). Короткое для веба
+  сначала скачивается в кэш: исправленный yt-dlp файл играет везде. Запросы
+  к googlevideo — с `rdns=True` и `URL(..., encoded=True)`, иначе 403.
+- «Джарвис» при открытой вкладке — Web Speech API браузера (на iPhone
+  распознавание Apple), `web/src/composables/useWakeWord.ts`. «Джарвис, включи
+  …» одной фразой → команда текстом; просто «Джарвис» → сигнал и запись с
+  автостопом по тишине (`useRecorder`). Слушает, только пока Джарвис свободен.
+- `index.html` отдаётся с `Cache-Control: no-cache`, иначе Safari держит
+  старую версию страницы.
+
+## Веб-интерфейсы снаружи (без Tailscale)
+
+```
+iPhone/Mac ─https─► Caddy на point ─► 127.0.0.1:<порт> ─ssh -R (jarvis-tunnel)─► asus
+  :8446 Jarvis  (basic auth Caddy)         18000 ─────────────────────► 127.0.0.1:8000
+  :8447 Hermes  (логин самого Hermes)      19119 ─────────────────────► 127.0.0.1:9119
+```
+
+- Дашборд Hermes слушает только loopback: drop-in
+  `scripts/systemd/hermes-dashboard.service.d/public.conf` (копируется в
+  `~/.config/systemd/user/hermes-dashboard.service.d/`). В `~/.hermes/config.yaml`
+  стоит `dashboard.public_url: https://point.abrdns.com:8447`: без него Hermes
+  отклоняет чужой Host, а с ним вход обязателен (`dashboard.basic_auth`).
+- «На экран Домой» на iPhone: iOS не берёт SVG, нужны PNG и манифест. У Jarvis они
+  лежат в `web/public/`, и Caddy отдаёт их без пароля. В Hermes теги дописывает
+  `scripts/hermes-pwa/build_dist.sh` (ExecStartPre): он копирует `web_dist` в
+  `~/.hermes/web_dist_pwa`, и дашборд работает из копии (`HERMES_WEB_DIST`).
+  `hermes update` пересобирает оригинал и перезапускает дашборд, после чего копия
+  создаётся заново.
+
+## Быстрые команды, история, Telegram
+
+- `app/agent/router.py` — «включи X / включи радио X / пауза / дальше /
+  громче / что играет / таймер на N» выполняются без Hermes (0,1–4 с).
+  Не подошло под правила или ничего не нашлось — в Hermes.
+- Hermes выполняет ходы одного разговора по очереди: если ход уже идёт,
+  новая реплика уходит в параллельный разговор (`services/hermes.py`).
+- История для экрана — `data/chat/<session>.jsonl`, `GET /chat/history`.
+- Прогресс просьб (какой инструмент работает) — событие `turn` в SSE плеера;
+  ✕ в чате — `POST /chat/cancel {turn_id}`.
+- «Пришли в Telegram» — MCP `send_telegram` (`services/telegram.py`): у
+  api_server Hermes нет send_message, он слал через одноразовый cron.
+- HLS для Safari выбирается по протоколу, а не по itag: у многоязычных видео
+  форматы `234-0/234-1`; запасной — HLS с видео.
+
+## Параллельные просьбы и отмена (app/turns.py, app/agent/conflicts.py)
+
+```
+«Джарвис»/кнопка — в любой момент (думает / говорит → голос замолкает)
+новая реплика ─► сразу в работу ─┐
+                 диспетчер ──────┴► какие выполняющиеся она отменяет:
+                   «стоп/хватит/передумал» → все; «включи…» → прошлые «включи…»;
+                   с LLM_API_KEY — DeepSeek понимает «нет, другую» и т.п.
+отмена = cancel задачи → закрыт поток к Hermes (stream=true) → Hermes прерывает агента
+```
+
+- Ход включает и синтез речи — «стоп» отменяет и долгую озвучку.
+- Реплика целиком «стоп/хватит/отмена/замолчи» обрабатывается ядром без
+  Hermes (~0,7 с): отменить всё, музыку на паузу, «Хорошо.».
+- Оборвался запрос клиента (iPhone свернул вкладку) — ход продолжается.
+- Веб: ответы озвучиваются по очереди и только когда пользователь не говорит;
+  отменённые реплики в ленте помечены «отменено».
+
 ## Таймеры и объявления (app/timers.py, app/services/speaker.py)
 
 MCP-инструменты `set_timer`, `remind`, `list_timers`, `cancel_timer`, `announce`.

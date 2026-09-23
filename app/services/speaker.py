@@ -1,9 +1,13 @@
 """Ядро говорит само, без запроса пользователя: таймеры, напоминания,
 объявления от Hermes cron.
 
-Играет через тот же dmix, что mpv и listener, — поэтому звучит поверх
+asus: играет через тот же dmix, что mpv и listener, — поэтому звучит поверх
 чего угодно; музыку на время объявления ставим на паузу тем же duck/unduck,
 что и при голосовой команде.
+
+Веб: сигнал+фраза склеиваются в один wav, браузеру уходит событие announce
+со ссылкой, музыку он приглушает сам. Если браузер не на связи (iOS усыпляет
+вкладку в фоне) — объявление звучит на asus, чтобы не потерялось.
 """
 
 from __future__ import annotations
@@ -13,11 +17,12 @@ import logging
 import math
 import struct
 import tempfile
+import uuid
 import wave
 from pathlib import Path
 
 from app.config import settings
-from app.music.player import player
+from app.music import devices, media
 from app.services import tts
 
 logger = logging.getLogger("jarvis.speaker")
@@ -57,7 +62,37 @@ async def _play(path: Path) -> None:
         logger.warning("aplay: %s", err.decode(errors="replace").strip())
 
 
-async def announce(text: str, chime: bool = True, repeat: int = 1) -> None:
+async def announce(text: str, device: str = devices.ASUS, chime: bool = True, repeat: int = 1) -> str:
+    """Возвращает устройство, на котором реально прозвучало."""
+    if device != devices.ASUS and devices.web_output(device).connected:
+        await _announce_web(text, device, chime, repeat)
+        return device
+    if device != devices.ASUS:
+        logger.info("%s не на связи — объявляю на asus", device)
+    await _announce_asus(text, chime, repeat)
+    return devices.ASUS
+
+
+async def _announce_web(text: str, device: str, chime: bool, repeat: int) -> None:
+    out = Path(tempfile.gettempdir()) / f"jarvis-announce-{uuid.uuid4().hex}.wav"
+    with tempfile.NamedTemporaryFile(suffix=".wav") as speech:
+        await tts.synthesize(text, Path(speech.name))
+        parts = ([str(_chime_path())] if chime else []) + [speech.name]
+        parts = parts * repeat
+        inputs = [arg for part in parts for arg in ("-i", part)]
+        mix = "".join(f"[{i}:a]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-loglevel", "error", *inputs, "-filter_complex", mix,
+            "-ar", str(_CHIME_RATE), "-ac", "1", str(out),
+        )
+        await proc.wait()
+    devices.web_output(device).announce(f"media/ref/{media.register(str(out))}")
+    # Браузер заберёт файл за секунды; через 10 минут он уже не нужен.
+    asyncio.get_running_loop().call_later(600, lambda: out.unlink(missing_ok=True))
+
+
+async def _announce_asus(text: str, chime: bool, repeat: int) -> None:
+    player = devices.player_for(devices.ASUS)
     async with _lock:
         with tempfile.NamedTemporaryFile(suffix=".wav") as speech:
             await tts.synthesize(text, Path(speech.name))

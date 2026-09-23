@@ -18,35 +18,53 @@ from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
 
-from app.music.player import player
-from app.services import speaker
+from app.music import devices
+from app.music.models import Kind
+from app.music.player import Player
+from app.services import speaker, telegram
 from app.timers import timers
 
 mcp = MCPServer(
     name="jarvis",
     instructions=(
-        "Домашний сервер Джарвиса: всё звучит дома, в колонке/гарнитуре, а не на "
-        "устройстве собеседника. Музыка и радио — play_music, play_radio, music_control, "
-        "set_volume, now_playing. Таймеры и напоминания голосом — set_timer, remind, "
-        "list_timers, cancel_timer. Сказать что-то вслух дома — announce. Никогда не "
-        "говори, что действие выполнено, не вызвав инструмент. Результат перескажи коротко."
+        "Плеер и таймеры Джарвиса. Звучит на том устройстве, с которого пришла реплика "
+        "(телефон, Mac, колонка дома); из Telegram — дома. Музыка, книги, подкасты, радио — "
+        "play_music, resume_listening, play_radio, music_control, seek, set_volume, now_playing. "
+        "Таймеры и напоминания голосом — set_timer, remind, list_timers, cancel_timer. "
+        "Сказать вслух дома — announce. Никогда не говори, что действие выполнено, не вызвав "
+        "инструмент. Результат перескажи коротко."
     ),
 )
 
 
 @mcp.tool()
-async def play_music(query: str, source: Literal["youtube", "local"] = "youtube") -> str:
-    """Включить музыку: артиста, песню, альбом, жанр или настроение.
+async def play_music(
+    query: str,
+    kind: Kind = "music",
+    source: Literal["youtube", "local"] = "youtube",
+) -> str:
+    """Включить музыку, аудиокнигу или подкаст.
 
-    Ищет на YouTube и сразу строит очередь из похожих треков (как «Моя волна»),
-    поэтому для «включи Queen» или «включи что-нибудь спокойное» достаточно
-    одного вызова. query — поисковый запрос как для YouTube, например
-    «Queen», «Кино Группа крови», «lofi hip hop», «русский рок 90-х».
+    kind=music — артист, песня, альбом, жанр, настроение: ищет на YouTube и
+    сразу строит очередь похожих (как «Моя волна»), одного вызова достаточно.
+    query — запрос как для YouTube: «Queen», «Кино Группа крови», «lofi hip hop».
+    kind=audiobook — аудиокнига («Мастер и Маргарита аудиокнига»),
+    kind=podcast — подкаст, лекция, выпуск новостей. Длинное продолжается с
+    места, где остановились в прошлый раз, на любом устройстве.
     source=local — только файлы из домашней библиотеки на сервере.
     """
+    player = devices.current_player()
     if source == "local":
         return await player.play_local(query)
-    return await player.play_youtube(query)
+    return await player.play_youtube(query, kind)
+
+
+@mcp.tool()
+async def resume_listening(query: str | None = None) -> str:
+    """Продолжить недослушанную книгу/подкаст с места остановки:
+    «продолжи книгу», «давай дальше Мастера и Маргариту» (query — часть
+    названия). Без query — последнее недослушанное."""
+    return await devices.current_player().resume_listening(query)
 
 
 @mcp.tool()
@@ -64,22 +82,45 @@ async def play_radio(
     """
     if not (name or genre or country_code):
         return "Уточни станцию, жанр или страну."
-    return await player.play_radio(name, genre, country_code)
+    return await devices.current_player().play_radio(name, genre, country_code)
+
+
+Where = Literal["here", "home", "everywhere"]
+
+
+def _players(where: Where) -> list[Player]:
+    if where == "home":
+        return [devices.player_for(devices.ASUS)]
+    if where == "everywhere":
+        return devices.active_players()
+    return [devices.current_player()]
 
 
 @mcp.tool()
-async def music_control(action: Literal["pause", "resume", "stop", "next", "previous"]) -> str:
+async def music_control(
+    action: Literal["pause", "resume", "stop", "next", "previous"],
+    where: Where = "here",
+) -> str:
     """Управление плеером: pause — пауза, resume — продолжить,
     stop — выключить музыку совсем, next — следующий трек/станция,
-    previous — предыдущий трек."""
-    handlers = {
-        "pause": player.pause,
-        "resume": player.resume,
-        "stop": player.stop,
-        "next": player.next,
-        "previous": player.previous,
-    }
-    return await handlers[action]()
+    previous — предыдущий трек.
+    where: here — на устройстве, с которого говорят (по умолчанию);
+    home — дома, на asus («выключи музыку на асусе/дома»);
+    everywhere — на всех устройствах («выключи везде»)."""
+    players = _players(where)
+    if not players:
+        return "Нигде ничего не играет."
+    replies = []
+    for player in players:
+        handlers = {
+            "pause": player.pause,
+            "resume": player.resume,
+            "stop": player.stop,
+            "next": player.next,
+            "previous": player.previous,
+        }
+        replies.append(await handlers[action]())
+    return replies[0] if len(replies) == 1 else f"Готово на {len(replies)} устройствах."
 
 
 @mcp.tool()
@@ -92,30 +133,49 @@ async def set_volume(level: int | None = None, delta: int | None = None) -> str:
     """
     if level is None and delta is None:
         return "Укажи level или delta."
-    return await player.volume(level=level, delta=delta)
+    return await devices.current_player().volume(level=level, delta=delta)
 
 
 @mcp.tool()
-async def now_playing() -> str:
-    """Что сейчас играет (трек или радиостанция, на паузе или нет) и что дальше в очереди."""
-    status = await player.now_playing()
-    upcoming = player.upcoming(3)
-    return status + (f" Дальше: {'; '.join(upcoming)}." if upcoming else "")
+async def now_playing(where: Where = "here") -> str:
+    """Что сейчас играет (трек или радиостанция, на паузе или нет) и что дальше.
+    where: here — на этом устройстве, home — дома на asus, everywhere — везде."""
+    players = _players(where)
+    if not players:
+        return "Нигде ничего не играет."
+    replies = []
+    for player in players:
+        status = await player.now_playing()
+        upcoming = player.upcoming(3)
+        where_label = "Дома" if player.device == devices.ASUS else "На телефоне/в браузере"
+        prefix = f"{where_label}: " if len(players) > 1 or where != "here" else ""
+        replies.append(prefix + status + (f" Дальше: {'; '.join(upcoming)}." if upcoming else ""))
+    return " ".join(replies)
+
+
+@mcp.tool()
+async def seek(delta_seconds: int | None = None, position_seconds: int | None = None) -> str:
+    """Перемотка в книге/подкасте/треке. «Назад на 30 секунд» → delta_seconds=-30,
+    «вперёд на 5 минут» → 300, «на час двадцать» → position_seconds=4800."""
+    if delta_seconds is None and position_seconds is None:
+        return "Укажи delta_seconds или position_seconds."
+    return await devices.current_player().seek(delta=delta_seconds, position=position_seconds)
 
 
 @mcp.tool()
 async def set_timer(minutes: float = 0, seconds: int = 0, label: str | None = None) -> str:
     """Таймер, который прозвенит и скажет вслух дома. «Поставь таймер на 5 минут» →
     minutes=5; «на полторы минуты» → minutes=1.5; «на 30 секунд» → seconds=30.
-    label — о чём таймер, если назван: «пельмени», «проверить духовку»."""
+    label — только если пользователь сказал, для чего таймер: «пельмени»,
+    «проверить духовку». «Таймер на 5 минут» — без label."""
     total = minutes * 60 + seconds
     if total <= 0:
         return "Укажи длительность таймера."
     # Модель иногда передаёт label="таймер" — это не название.
-    if label and label.strip().lower() in ("таймер", "timer"):
+    if label and label.strip().lower().startswith(("таймер", "timer")):
         label = None
     text = f"Таймер «{label}»: время вышло." if label else "Время вышло, таймер сработал."
-    alarm = timers.add(time.time() + total, text)
+    alarm = timers.add(time.time() + total, text, devices.current_device())
     return f"Таймер {alarm.id} поставлен, сработает в {alarm.due_local}."
 
 
@@ -133,7 +193,7 @@ async def remind(at: str, text: str) -> str:
     now = datetime.now()
     if due <= now:
         return f"Это время уже прошло, сейчас {now:%d.%m %H:%M}."
-    alarm = timers.add(due.timestamp(), f"Напоминаю: {text}")
+    alarm = timers.add(due.timestamp(), f"Напоминаю: {text}", devices.current_device())
     return f"Напоминание {alarm.id} на {alarm.due_local}."
 
 
@@ -164,8 +224,18 @@ async def cancel_timer(alarm_id: str | None = None, cancel_all: bool = False) ->
 
 
 @mcp.tool()
+async def send_telegram(text: str) -> str:
+    """Прислать хозяину сообщение в Telegram прямо сейчас: «пришли/скинь мне в
+    телеграм …». Только когда об этом просят. Не cronjob — cron доставляет
+    через минуты и в служебной обёртке. text — ровно то, что просили, без
+    лишних пояснений (номер, ссылка, список)."""
+    await telegram.send(text)
+    return "Отправил в Telegram."
+
+
+@mcp.tool()
 async def announce(text: str) -> str:
-    """Сказать фразу вслух дома прямо сейчас (с сигналом, музыка на это время
-    встаёт на паузу). Для запланированных задач cron: «напомни голосом …»."""
-    await speaker.announce(text)
-    return "Сказал."
+    """Сказать фразу вслух прямо сейчас (с сигналом, музыка на это время
+    встаёт на паузу). Из cron и Telegram — дома. Для задач cron: «напомни голосом …»."""
+    where = await speaker.announce(text, devices.current_device())
+    return "Сказал." if where == devices.current_device() else "Устройство не на связи — сказал дома."
