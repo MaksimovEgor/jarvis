@@ -40,6 +40,7 @@ import edge_tts
 from aiohttp_socks import ProxyConnector
 
 from app.config import settings
+from app.services.speakable import speakable
 
 logger = logging.getLogger("jarvis.tts")
 
@@ -146,6 +147,10 @@ async def warmup() -> None:
 
 
 async def _synthesize_vosk(text: str, out_path: Path) -> Path:
+    # Vosk знает только кириллицу: цифры, латиница, «» — KeyError (см. speakable).
+    text = speakable(text)
+    if not any(ch.isalnum() for ch in text):
+        return _silence(out_path)
     async with _vosk_lock:
         synth = await asyncio.to_thread(_load_vosk)
         await asyncio.to_thread(
