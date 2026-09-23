@@ -11,11 +11,12 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sse_starlette import EventSourceResponse
 
 from app.music import devices
+from app.turns import turns
 
 router = APIRouter(prefix="/player")
 
@@ -44,15 +45,23 @@ class PlayerControl(BaseModel):
 
 
 @router.get("/events")
-async def events(device: str) -> EventSourceResponse:
-    output = devices.web_output(_web_device(device))
-    queue = output.subscribe()
+async def events(
+    device: str, since: str | None = None, last_event_id: str | None = Header(None),
+) -> EventSourceResponse:
+    """since — id последнего полученного события: браузер сам шлёт его
+    заголовком Last-Event-ID при автопереподключении, а при новом EventSource
+    (вкладка вернулась из фона) — параметром."""
+    device = _web_device(device)
+    output = devices.web_output(device)
+    queue = output.subscribe(since or last_event_id, turns.active(device))
 
     async def stream() -> AsyncIterator[dict[str, Any]]:
         try:
             while True:
-                event = await queue.get()
-                yield {"data": json.dumps(event, ensure_ascii=False)}
+                event = dict(await queue.get())
+                event_id = event.pop("_id", None)
+                message = {"data": json.dumps(event, ensure_ascii=False)}
+                yield {**message, "id": event_id} if event_id else message
         finally:
             output.unsubscribe(queue)
 

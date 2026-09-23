@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, type ChatReply, type SpeechMore } from './api'
+import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, type SpeechMore } from './api'
 import ChatLog from './components/ChatLog.vue'
 import PlayerBar from './components/PlayerBar.vue'
 import TalkButton from './components/TalkButton.vue'
@@ -10,13 +10,13 @@ import { useMusic } from './composables/useMusic'
 import { usePlayer } from './composables/usePlayer'
 import { useRecorder } from './composables/useRecorder'
 import { useWakeWord } from './composables/useWakeWord'
-import type { Message, Status, TurnEvent } from './types'
+import type { Message, Status, TurnEvent, TurnsEvent } from './types'
 
 const recorder = useRecorder()
 const player = usePlayer()
 const earcon = useEarcon()
 // Объявления таймеров играет голосовой плеер, музыка на это время молчит.
-const music = useMusic((url) => player.playUrl(url), onTurn)
+const music = useMusic((url) => player.playUrl(url), onTurn, onTurns)
 const {
   title: musicTitle,
   wantPlaying: musicPlaying,
@@ -64,15 +64,79 @@ void fetchHistory().then((entries) => {
   messages.value = [...restored, ...messages.value]
 })
 
-// Прогресс просьбы: какой инструмент сейчас работает.
-function onTurn(event: TurnEvent): void {
-  const msg = messages.value.find((m) => m.pending?.turnId === event.id)
-  if (!msg?.pending) return
+// --- ходы: ответ приходит событием SSE, а не в ответе на POST ---
+
+// Досланный после переподключения ответ старше этого — только текстом.
+const SPEAK_FRESH_SECONDS = 60
+
+interface InFlight {
+  msg: Message
+  // POST вернул «принято» — ход точно есть на ядре.
+  accepted: boolean
+  // Музыка удержана на этот ход (реплика с этой вкладки).
+  held: boolean
+}
+
+// Ходы в работе по id. Сюда же попадают идущие ходы, о которых вкладка
+// узнала после перезагрузки (событие turns).
+const inFlight = new Map<string, InFlight>()
+// Завершённые — повторно досланный итог не показываем дважды.
+const settled = new Set<string>()
+
+function begin(turnId: string, msg: Message, held: boolean): InFlight {
+  const entry: InFlight = { msg, accepted: false, held }
+  msg.pending = { turnId, since: Date.now() }
+  inFlight.set(turnId, entry)
+  pending.value += 1
+  return entry
+}
+
+// Ход закончился: снять «думаю». Музыку отпускает вызывающий — после озвучки.
+function settle(turnId: string): InFlight | undefined {
+  settled.add(turnId)
+  const entry = inFlight.get(turnId)
+  if (!entry) return undefined
+  inFlight.delete(turnId)
+  entry.msg.pending = undefined
+  pending.value -= 1
+  return entry
+}
+
+async function onTurn(event: TurnEvent): Promise<void> {
+  const entry = inFlight.get(event.id)
+  if (event.transcript !== undefined && entry) entry.msg.text = event.transcript || '(не расслышал)'
+  if (event.tool && entry?.msg.pending) entry.msg.pending.tool = event.tool
+  const final = event.reply !== undefined || event.cancelled || event.error !== undefined
+  if (!final || settled.has(event.id)) return
+
+  const done = settle(event.id)
   if (event.cancelled) {
-    msg.pending = undefined
-    msg.cancelled = true
-  } else if (event.tool) {
-    msg.pending.tool = event.tool
+    if (done) done.msg.cancelled = true
+  } else if (event.error !== undefined) {
+    push('error', event.error)
+  } else {
+    push('assistant', event.reply ?? '', event.tools)
+    if (event.speech && (event.age ?? 0) < SPEAK_FRESH_SECONDS) await speak(event.speech)
+  }
+  if (done?.held) music.release()
+}
+
+// После (пере)подключения SSE: ядро прислало пропущенное и список идущих ходов.
+function onTurns(event: TurnsEvent): void {
+  const active = new Set(event.active.map((t) => t.id))
+  // Принятый ход пропал с ядра, а итога нет — ядро перезапускалось.
+  for (const [turnId, entry] of inFlight) {
+    if (!entry.accepted || active.has(turnId)) continue
+    settle(turnId)
+    push('error', 'Ответ потерялся: Джарвис перезапускался. Повтори, пожалуйста.')
+    if (entry.held) music.release()
+  }
+  // Идущие ходы, о которых вкладка не знает (её перезагрузили), — на экран.
+  for (const t of event.active) {
+    if (inFlight.has(t.id) || settled.has(t.id)) continue
+    const entry = begin(t.id, push('user', t.text || '…'), false)
+    entry.accepted = true
+    if (entry.msg.pending && t.tool) entry.msg.pending.tool = t.tool
   }
 }
 
@@ -103,8 +167,7 @@ document.addEventListener('visibilitychange', syncWake)
 // --- озвучка ответов: по очереди, и только когда пользователь не говорит ---
 
 interface Speech {
-  audio: string
-  more?: SpeechMore | null
+  more: SpeechMore
   done: () => void
 }
 const speechQueue: Speech[] = []
@@ -112,9 +175,9 @@ let draining = false
 // Меняется при каждом «перебили» — недоигранный длинный ответ это видит.
 let speechGeneration = 0
 
-function speak(audio: string, more?: SpeechMore | null): Promise<void> {
+function speak(more: SpeechMore): Promise<void> {
   return new Promise((done) => {
-    speechQueue.push({ audio, more, done })
+    speechQueue.push({ more, done })
     void drainSpeech()
   })
 }
@@ -130,13 +193,11 @@ async function drainSpeech(): Promise<void> {
   draining = false
 }
 
-// Длинный ответ: первый кусок сразу, следующий качается, пока звучит текущий.
-async function playSpeech({ audio, more }: Speech): Promise<void> {
+// Куски озвучки по очереди: следующий качается, пока звучит текущий.
+async function playSpeech({ more }: Speech): Promise<void> {
   const generation = speechGeneration
-  let upcoming = more && more.count > 1 ? fetchSpeechChunk(more.id, 1) : null
-  await player.play(audio)
-  for (let n = 1; more && upcoming && n < more.count; n++) {
-    if (generation !== speechGeneration) return
+  let upcoming: Promise<Blob> | null = fetchSpeechChunk(more.id, 0)
+  for (let n = 0; upcoming; n++) {
     let blob: Blob
     try {
       blob = await upcoming
@@ -230,32 +291,18 @@ async function onSubmit(): Promise<void> {
   await ask((turnId) => sendText(text, true, turnId), text)
 }
 
-// Одна реплика. text=null — голос: текст придёт с ответом (расшифровка).
-// Музыка удержана вызывающим; отпускается, когда ответ доозвучен.
-async function ask(request: (turnId: string) => Promise<ChatReply>, text: string | null): Promise<void> {
+// Одна реплика. text=null — голос: текст придёт событием (расшифровка).
+// Музыка удержана вызывающим; отпускается, когда ответ доозвучен (onTurn).
+async function ask(request: (turnId: string) => Promise<void>, text: string | null): Promise<void> {
   const turnId = crypto.randomUUID()
-  const mine = push('user', text ?? '…')
-  mine.pending = { turnId, since: Date.now() }
-  pending.value += 1
+  const entry = begin(turnId, push('user', text ?? '…'), true)
   try {
-    const res = await request(turnId)
-    mine.pending = undefined
-    if (res.transcript !== undefined) mine.text = res.transcript || '(не расслышал)'
-    if (res.cancelled) {
-      mine.cancelled = true
-      return
-    }
-    push('assistant', res.reply, res.tool_calls)
-    if (res.audio_base64) {
-      pending.value -= 1
-      await speak(res.audio_base64, res.audio_more)
-      pending.value += 1
-    }
+    await request(turnId)
+    entry.accepted = true
   } catch (e) {
+    // Итог мог успеть прийти событием раньше ошибки запроса.
+    if (!settle(turnId)) return
     push('error', errorText(e))
-  } finally {
-    mine.pending = undefined
-    pending.value -= 1
     music.release()
   }
 }

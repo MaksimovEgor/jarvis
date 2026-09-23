@@ -10,6 +10,8 @@ ssh "$HOST" "mkdir -p $REMOTE_DIR"
 rsync -az --delete \
   --exclude '.venv' --exclude '__pycache__' --exclude '.git' \
   --exclude 'data/models' --exclude 'data/music' \
+  --exclude '.env' --exclude 'data/chat' --exclude 'data/*.json' \
+  --exclude 'web/dist/voice-samples' \
   --exclude 'docker/searxng/settings.yml' --exclude 'web/node_modules' \
   ./ "$HOST:$REMOTE_DIR/"
 

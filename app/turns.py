@@ -11,6 +11,17 @@ Hermes закрывается, и Hermes прерывает агента (см. 
 Прогресс (какой инструмент сейчас работает) и отмена уходят на экран
 устройства событием {"type": "turn"} по SSE плеера — видно, над чем
 Джарвис думает, и можно отменить конкретную просьбу.
+
+Веб не ждёт ответа в HTTP-запросе (detach): POST сразу возвращает «принято»,
+а расшифровка, прогресс, ответ и ошибка приходят событиями по SSE. Долгий
+POST через Caddy и ssh-туннель рвался (свёрнутая вкладка, моргнувший туннель),
+и ответ, уже готовый на ядре, до экрана не доходил:
+
+    POST /chat/* ─► 202 ─┐
+                         ▼
+    detach: STT → run → озвучка ─► emit {"type": "turn", id, transcript|tool|reply|error|cancelled}
+                                        │ WebOutput хранит события (outputs.py)
+    SSE переподключился ◄───────────────┘ пропущенные досылаются + список идущих ходов
 """
 
 from __future__ import annotations
@@ -38,11 +49,35 @@ class Turn:
     device: str
     text: str
     task: asyncio.Task[Answer] = field(repr=False)
+    tool: str | None = None
+
+
+@dataclass
+class _Detached:
+    """Ход веба целиком — от расшифровки до озвучки ответа."""
+    device: str
+    text: str
+    task: asyncio.Task[None] = field(repr=False)
 
 
 class Turns:
     def __init__(self) -> None:
         self._active: dict[str, Turn] = {}
+        self._detached: dict[str, _Detached] = {}
+
+    def detach(self, turn_id: str, device: str, text: str, job: Awaitable[None]) -> None:
+        """Ход без ожидающего HTTP-запроса: результат уйдёт событиями (emit)."""
+        task = asyncio.create_task(job)
+        self._detached[turn_id] = _Detached(device=device, text=text, task=task)
+        task.add_done_callback(lambda _: self._detached.pop(turn_id, None))
+
+    def active(self, device: str) -> list[dict[str, str | None]]:
+        """Идущие ходы устройства — экрану после переподключения SSE."""
+        return [
+            {"id": turn_id, "text": d.text, "tool": getattr(self._active.get(turn_id), "tool", None)}
+            for turn_id, d in self._detached.items()
+            if d.device == device
+        ]
 
     async def run(
         self, turn_id: str, session_id: str, device: str, text: str,
@@ -50,7 +85,13 @@ class Turns:
     ) -> Answer | None:
         """Ответ хода или None, если его отменили (новой репликой или ✕)."""
         running = [t for t in self._active.values() if t.session_id == session_id]
-        task = asyncio.create_task(work(lambda tool: self._notify(device, turn_id, tool=tool)))
+
+        def progress(tool: str) -> None:
+            if current := self._active.get(turn_id):
+                current.tool = tool
+            self.emit(device, turn_id, tool=tool)
+
+        task = asyncio.create_task(work(progress))
         turn = Turn(id=turn_id, session_id=session_id, device=device, text=text, task=task)
         self._active[turn_id] = turn
         task.add_done_callback(lambda _: self._active.pop(turn_id, None))
@@ -61,20 +102,17 @@ class Turns:
         # задача продолжает выполняться.
         await asyncio.wait({task})
         if task.cancelled():
-            self._notify(device, turn_id, cancelled=True)
+            self.emit(device, turn_id, cancelled=True)
             return None
         return task.result()
 
-    @staticmethod
-    def _notify(device: str, turn_id: str, tool: str | None = None, cancelled: bool = False) -> None:
+    def emit(self, device: str, turn_id: str, **fields: object) -> None:
+        """Событие хода на экран устройства. У asus экрана нет."""
         if device == devices.ASUS:
             return
-        event: dict[str, object] = {"type": "turn", "id": turn_id}
-        if tool:
-            event["tool"] = tool
-        if cancelled:
-            event["cancelled"] = True
-        devices.web_output(device).notify(event)
+        if isinstance(fields.get("transcript"), str) and (d := self._detached.get(turn_id)):
+            d.text = str(fields["transcript"])
+        devices.web_output(device).notify({"type": "turn", "id": turn_id, **fields})
 
     async def _resolve(self, new: Turn, running: list[Turn]) -> None:
         try:

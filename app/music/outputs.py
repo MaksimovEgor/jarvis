@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import Any, Awaitable, Callable
 
 from app.config import settings
@@ -28,6 +30,12 @@ from app.music.mpv import MPV
 logger = logging.getLogger("jarvis.outputs")
 
 EndHandler = Callable[[str], Awaitable[None]]  # reason: "eof" | "error"
+
+# id событий хода — «<запуск ядра>:<номер>»: после рестарта ядра номера
+# начинаются заново, и старый Last-Event-ID браузера не должен их скрыть.
+BOOT = uuid.uuid4().hex[:8]
+# Столько хранятся события хода для повтора переподключившемуся браузеру.
+REPLAY_SECONDS = 600
 
 
 class Output(ABC):
@@ -154,6 +162,9 @@ class WebOutput(Output):
         self._volume: int | None = None
         # Safari играет длинное только через HLS (см. media.py).
         self._hls = False
+        # События ходов с номерами — iOS рвёт SSE, пропущенное досылаем.
+        self._log: deque[tuple[int, float, dict[str, Any]]] = deque(maxlen=200)
+        self._event_id = 0
 
     # --- связь с браузером ------------------------------------------------
 
@@ -168,12 +179,31 @@ class WebOutput(Output):
         for queue in self._subscribers:
             queue.put_nowait(event)
 
-    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+    def subscribe(self, since: str | None, active: list[dict[str, Any]]) -> asyncio.Queue[dict[str, Any]]:
+        """Снимок плеера, пропущенные после since события ходов и список идущих
+        ходов (active) — по нему экран поймёт, какие просьбы потерялись.
+        Событие с ключом "_id" уходит в SSE с этим id."""
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         queue.put_nowait(self.snapshot())
+        for event in self._missed(since):
+            queue.put_nowait(event)
+        queue.put_nowait({"type": "turns", "active": active, "_id": f"{BOOT}:{self._event_id}"})
         self._subscribers.add(queue)
         self._last_seen = time.time()
         return queue
+
+    def _missed(self, since: str | None) -> list[dict[str, Any]]:
+        # Без since — страница только открылась: готовое она берёт из истории.
+        if not since:
+            return []
+        boot, _, n = since.partition(":")
+        after = int(n) if boot == BOOT and n.isdigit() else 0
+        now = time.time()
+        return [
+            {**event, "age": round(now - at), "_id": f"{BOOT}:{i}"}
+            for i, at, event in self._log
+            if i > after and now - at < REPLAY_SECONDS
+        ]
 
     def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         self._subscribers.discard(queue)
@@ -182,8 +212,10 @@ class WebOutput(Output):
         self._push({"type": "announce", "url": url})
 
     def notify(self, event: dict[str, Any]) -> None:
-        """Прочие события экрану (прогресс просьб, app/turns.py)."""
-        self._push(event)
+        """События ходов экрану (app/turns.py) — с номером и в журнал для повтора."""
+        self._event_id += 1
+        self._log.append((self._event_id, time.time(), event))
+        self._push({**event, "_id": f"{BOOT}:{self._event_id}"})
 
     async def report(self, data: dict[str, Any]) -> None:
         """Отчёт браузера: позиция, пауза, конец/ошибка трека."""

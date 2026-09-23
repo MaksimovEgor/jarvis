@@ -1,10 +1,11 @@
 import { computed, ref } from 'vue'
 
 import { playerControl, playerEventsUrl, playerReport, type PlayerReport } from '../api'
-import type { PlayerEvent, PlayerState, TurnEvent } from '../types'
+import type { PlayerEvent, PlayerState, TurnEvent, TurnsEvent } from '../types'
 import { SILENCE } from './usePlayer'
 
 const REPORT_EVERY_MS = 10_000
+const RECONNECT_MS = 3_000
 
 // Громкость <audio> на iPhone не меняется (только кнопками) — сообщаем ядру,
 // чтобы «тише» отвечало честно.
@@ -17,8 +18,13 @@ function detectVolumeSupport(): boolean {
 // Музыка на этом устройстве. Ядро присылает желаемое состояние (что играть,
 // с какой секунды, пауза), браузер приводит к нему свой <audio> и
 // отчитывается позицией и концом трека — очередь и память позиций на ядре.
-// Тот же SSE-канал везёт прогресс просьб — его отдаём наружу через onTurn.
-export function useMusic(onAnnounce: (url: string) => Promise<void>, onTurn: (event: TurnEvent) => void) {
+// Тот же SSE-канал везёт ходы (расшифровка, прогресс, ответ) — их отдаём
+// наружу через onTurn/onTurns.
+export function useMusic(
+  onAnnounce: (url: string) => Promise<void>,
+  onTurn: (event: TurnEvent) => void,
+  onTurns: (event: TurnsEvent) => void,
+) {
   const title = ref<string | null>(null)
   const live = ref(false)
   const wantPlaying = ref(false)
@@ -41,6 +47,9 @@ export function useMusic(onAnnounce: (url: string) => Promise<void>, onTurn: (ev
   let unlocking = false
   let selfPause = false
   let events: EventSource | null = null
+  // id последнего события — при переподключении ядро дошлёт пропущенное.
+  let lastEventId = ''
+  let reconnectTimer: number | null = null
 
   const hasTrack = computed(() => title.value !== null)
 
@@ -106,14 +115,33 @@ export function useMusic(onAnnounce: (url: string) => Promise<void>, onTurn: (ev
       case 'turn':
         onTurn(event)
         break
+      case 'turns':
+        onTurns(event)
+        break
     }
   }
 
   function connect(): void {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
     events?.close()
-    events = new EventSource(playerEventsUrl())
-    events.onmessage = (e) => onEvent(JSON.parse(e.data) as PlayerEvent)
+    events = new EventSource(playerEventsUrl(lastEventId))
+    events.onmessage = (e) => {
+      if (e.lastEventId) lastEventId = e.lastEventId
+      onEvent(JSON.parse(e.data) as PlayerEvent)
+    }
     events.onopen = () => void playerReport({ seq, volume_supported: volumeSupported, hls })
+    // Браузер переподключается сам, но после ответа 5xx (ядро рестартует)
+    // сдаётся и закрывает канал — тогда пробуем снова сами.
+    events.onerror = () => {
+      if (events?.readyState !== EventSource.CLOSED || reconnectTimer !== null) return
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null
+        if (document.visibilityState === 'visible') connect()
+      }, RECONNECT_MS)
+    }
   }
 
   // --- события <audio> ------------------------------------------------------

@@ -88,16 +88,18 @@ def _device(device: str) -> str:
     return device
 
 
-async def _stop_everything(session_id: str, device: str, speak: bool) -> tuple[str, list[str], Spoken | None]:
+async def _stop_everything(
+    session_id: str, device: str, speak: bool, inline: bool = True,
+) -> tuple[str, list[str], Spoken | None]:
     """«Стоп» как у Алисы — мгновенно и без Hermes: отменить всё, что
     выполняется, и поставить музыку на паузу."""
     turns.cancel(session_id)
     await devices.player_for(device).pause()
-    return "Хорошо.", [], await _speak("Хорошо.") if speak else None
+    return "Хорошо.", [], await speech.speak("Хорошо.", inline) if speak else None
 
 
 async def _answer(
-    session_id: str, text: str, device: str, speak: bool, progress: Callable[[str], None],
+    session_id: str, text: str, device: str, speak: bool, inline: bool, progress: Callable[[str], None],
 ) -> tuple[str, list[str], Spoken | None]:
     """Весь ход целиком — и ответ, и его озвучка: «стоп» должен отменять и
     синтез длинного ответа, иначе он прозвучит уже после «стопа».
@@ -112,19 +114,58 @@ async def _answer(
                 reply, tools = await run_hermes(session_id, text, progress)
             else:
                 reply, tools = await run_agent(_sessions.setdefault(session_id, []), text)
-    return reply, tools, await _speak(reply) if speak else None
+    return reply, tools, await speech.speak(reply, inline) if speak else None
 
 
 async def _run_turn(
-    turn_id: str | None, session_id: str, device: str, text: str, speak: bool,
+    turn_id: str, session_id: str, device: str, text: str, speak: bool, inline: bool = True,
 ) -> tuple[str, list[str], Spoken | None] | None:
     result = await turns.run(
-        turn_id or uuid.uuid4().hex, session_id, device, text,
-        lambda progress: _answer(session_id, text, device, speak, progress),
+        turn_id, session_id, device, text,
+        lambda progress: _answer(session_id, text, device, speak, inline, progress),
     )
     reply, tools = (result[0], result[1]) if result else ("", [])
     history.append(session_id, text, reply, tools, cancelled=result is None)
     return result
+
+
+async def _transcribe(data: bytes, filename: str | None) -> str:
+    with tempfile.NamedTemporaryFile(suffix=Path(filename or "in.wav").suffix or ".wav") as tmp_in:
+        tmp_in.write(data)
+        tmp_in.flush()
+        transcript = await stt.transcribe(Path(tmp_in.name))
+    logger.info("STT: %s", transcript)
+    return transcript
+
+
+def _detach(
+    turn_id: str, session_id: str, device: str, speak: bool,
+    text: str | None = None, audio: tuple[bytes, str | None] | None = None,
+) -> None:
+    """Ход веба: запрос уже вернул «принято», всё остальное — событиями SSE."""
+
+    async def job() -> None:
+        try:
+            heard = text if audio is None else await _transcribe(*audio)
+            if audio is not None:
+                turns.emit(device, turn_id, transcript=heard)
+            if not heard.strip():
+                reply, tools, spoken = "Не расслышал.", [], await speech.speak("Не расслышал.", False)
+            elif conflicts.is_just_stop(heard):
+                reply, tools, spoken = await _stop_everything(session_id, device, speak, False)
+                history.append(session_id, heard, reply, tools)
+            else:
+                result = await _run_turn(turn_id, session_id, device, heard, speak, False)
+                if result is None:
+                    return  # об отмене экран уже знает (turns.run)
+                reply, tools, spoken = result
+            speech_ref = {"id": spoken.job_id, "count": spoken.count} if spoken and spoken.job_id else None
+            turns.emit(device, turn_id, reply=reply, tools=tools, speech=speech_ref)
+        except Exception as exc:
+            logger.exception("Ход %s упал", turn_id)
+            turns.emit(device, turn_id, error=f"Не получилось: {exc}"[:300])
+
+    turns.detach(turn_id, device, text or "", job())
 
 
 @app.get("/health")
@@ -135,11 +176,15 @@ async def health() -> dict:
 @app.post("/chat/text", response_model=TextChatResponse)
 async def chat_text(req: TextChatRequest) -> TextChatResponse:
     device = _device(req.device)
+    turn_id = req.turn_id or uuid.uuid4().hex
+    if req.detach and device != devices.ASUS:
+        _detach(turn_id, req.session_id, device, req.speak, text=req.text)
+        return TextChatResponse(reply="", accepted=True)
     if conflicts.is_just_stop(req.text):
         reply, tool_calls, spoken = await _stop_everything(req.session_id, device, req.speak)
         history.append(req.session_id, req.text, reply, tool_calls)
         return TextChatResponse(reply=reply, tool_calls=tool_calls, **_audio(spoken))
-    result = await _run_turn(req.turn_id, req.session_id, device, req.text, req.speak)
+    result = await _run_turn(turn_id, req.session_id, device, req.text, req.speak)
     if result is None:
         return TextChatResponse(reply="", cancelled=True)
     reply, tool_calls, spoken = result
@@ -159,17 +204,18 @@ async def chat_history(session_id: str = "default", limit: int = 100) -> list[di
 
 @app.post("/chat/audio", response_model=AudioChatResponse)
 async def chat_audio(
-    file: UploadFile, session_id: str = "default", device: str = devices.ASUS, turn_id: str | None = None
+    file: UploadFile, session_id: str = "default", device: str = devices.ASUS,
+    turn_id: str | None = None, detach: bool = False,
 ) -> AudioChatResponse:
     _device(device)
-    with tempfile.NamedTemporaryFile(suffix=Path(file.filename or "in.wav").suffix or ".wav") as tmp_in:
-        tmp_in.write(await file.read())
-        tmp_in.flush()
-        transcript = await stt.transcribe(Path(tmp_in.name))
-    logger.info("STT: %s", transcript)
+    turn_id = turn_id or uuid.uuid4().hex
+    if detach and device != devices.ASUS:
+        _detach(turn_id, session_id, device, True, audio=(await file.read(), file.filename))
+        return AudioChatResponse(transcript="", reply="", accepted=True)
+    transcript = await _transcribe(await file.read(), file.filename)
     if not transcript.strip():
         # Тишина/шум — в Hermes не отправляем (пустой ввод даёт 500).
-        return AudioChatResponse(transcript="", reply="Не расслышал.", tool_calls=[], **_audio(await _speak("Не расслышал.")))
+        return AudioChatResponse(transcript="", reply="Не расслышал.", tool_calls=[], **_audio(await speech.speak("Не расслышал.")))
 
     if conflicts.is_just_stop(transcript):
         reply, tool_calls, spoken = await _stop_everything(session_id, device, True)
@@ -205,11 +251,6 @@ async def music_unduck() -> dict:
 @app.get("/music/state")
 async def music_state(device: str = devices.ASUS) -> dict:
     return await devices.player_for(_device(device)).state()
-
-
-async def _speak(text: str) -> Spoken:
-    # Длинное — первый кусок сразу, остальные клиент заберёт из /tts/chunk.
-    return await speech.speak(text)
 
 
 def _audio(spoken: Spoken | None) -> dict[str, Any]:

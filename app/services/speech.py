@@ -35,8 +35,8 @@ JOB_TTL = 600.0
 
 @dataclass
 class Spoken:
-    """Озвучка ответа: первый кусок сразу, остальные — по id."""
-    audio_base64: str
+    """Озвучка ответа: первый кусок сразу (или тоже по id), остальные — по id."""
+    audio_base64: str | None
     job_id: str | None = None
     count: int = 1
 
@@ -84,14 +84,18 @@ def _prune() -> None:
             task.cancel()
 
 
-async def speak(text: str) -> Spoken:
+async def speak(text: str, inline: bool = True) -> Spoken:
+    """inline=False — ответ уходит событием SSE (веб): тогда и первый кусок
+    клиент забирает по id, а не в base64 внутри события — события хранятся
+    для повтора переподключившемуся браузеру и должны быть лёгкими."""
     _prune()
     chunks = _split(tts.clean(text))
-    if len(chunks) <= 1:
+    if inline and len(chunks) <= 1:
         return Spoken(base64.b64encode(await _synth(text)).decode())
     job_id = uuid.uuid4().hex
-    job = _jobs[job_id] = _Job(chunks)
-    return Spoken(base64.b64encode(await chunk(job_id, 0)).decode(), job_id, len(chunks))
+    job = _jobs[job_id] = _Job(chunks or [text])
+    first = await chunk(job_id, 0)
+    return Spoken(base64.b64encode(first).decode() if inline else None, job_id, len(job.chunks))
 
 
 async def chunk(job_id: str, n: int) -> bytes:
