@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Профиль Hermes «dj» на asus: музыкальный вкус для «Моей волны» (app/music/taste.py).
 # Запуск с Mac:  ssh asus 'bash -s' < scripts/hermes-dj/setup.sh
-# (код Jarvis уже выкачен в ~/jarvis — нужен SOUL.md и юнит оттуда). Повторный
+# (код Jarvis уже выкачен в ~/jarvis — нужен SOUL.md оттуда). Повторный
 # запуск безопасен: ключ API и память не перезаписываются.
 #
-# Основной профиль и его gateway не трогаем: у dj свой процесс, своя память,
-# свой API на 127.0.0.1:8643. Из .env основного копируются только ключ DeepSeek
-# и прокси — НЕ токен Telegram (два gateway на одном боте мешают друг другу).
+# С Hermes 0.21.5 один gateway на хост обслуживает все профили: dj — своя память
+# и свой ключ, API — основной gateway по префиксу 127.0.0.1:8642/p/dj. Из .env
+# основного копируются только ключ DeepSeek и прокси — НЕ токен Telegram.
 set -euo pipefail
 
 HERMES=~/.local/bin/hermes
@@ -27,7 +27,6 @@ grep -E '^(DEEPSEEK_API_KEY|DEEPSEEK_BASE_URL|HTTPS_PROXY|HTTP_PROXY|ALL_PROXY|h
     done
 grep -q '^API_SERVER_ENABLED=' "$DJ/.env" || echo 'API_SERVER_ENABLED=true' >> "$DJ/.env"
 grep -q '^API_SERVER_HOST=' "$DJ/.env" || echo 'API_SERVER_HOST=127.0.0.1' >> "$DJ/.env"
-grep -q '^API_SERVER_PORT=' "$DJ/.env" || echo 'API_SERVER_PORT=8643' >> "$DJ/.env"
 grep -q '^API_SERVER_KEY=' "$DJ/.env" || echo "API_SERVER_KEY=$(openssl rand -hex 24)" >> "$DJ/.env"
 KEY=$(grep '^API_SERVER_KEY=' "$DJ/.env" | cut -d= -f2-)
 
@@ -53,14 +52,13 @@ else
   printf '\nDJ_HERMES_API_KEY=%s\n' "$KEY" >> "$JARVIS/.env"
 fi
 
-mkdir -p ~/.config/systemd/user
-cp "$JARVIS/scripts/systemd/hermes-dj.service" ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now hermes-dj
-systemctl --user restart hermes-dj
+# Отдельный gateway dj (до 0.21.5) больше не нужен — основной подхватывает профиль сам.
+systemctl --user disable --now hermes-dj 2>/dev/null || true
+kill -USR1 "$(systemctl show -p MainPID --value hermes-gateway)"
 echo "dj: ждём API…"
 for _ in $(seq 1 45); do
-  curl -sf -m 2 http://127.0.0.1:8643/health >/dev/null && { echo "dj работает на 127.0.0.1:8643"; exit 0; }
+  curl -sf -m 2 -H "Authorization: Bearer $KEY" http://127.0.0.1:8642/p/dj/v1/models >/dev/null \
+    && { echo "dj работает: 127.0.0.1:8642/p/dj"; exit 0; }
   sleep 2
 done
-echo "dj не поднялся: journalctl --user -u hermes-dj -n 50"; exit 1
+echo "dj не отвечает: journalctl -u hermes-gateway -n 50"; exit 1

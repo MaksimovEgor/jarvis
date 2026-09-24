@@ -54,6 +54,11 @@ for _ in \$(seq 1 60); do
 done
 curl -sf http://127.0.0.1:8000/health >/dev/null && echo "Ядро работает." || { echo "Ядро не поднялось: journalctl --user -u jarvis-core"; exit 1; }
 
+# Резервная LLM (Ollama ставится вручную, README) — только если установлена.
+if [ -x ~/.local/ollama/bin/ollama ]; then
+  systemctl --user enable -q --now jarvis-llm
+fi
+
 # jarvis-tts держит модель Vosk (~60 с загрузки) — перезапускаем, только если
 # изменился его код или юнит; ядро тем временем говорит Piper'ом. После ядра:
 # старое ядро само держало копию модели, две копии сразу — лишние ~ГБ памяти.

@@ -30,13 +30,9 @@ import numpy as np
 from faster_whisper import decode_audio
 
 from app.config import settings
+from app.services.audio_split import SAMPLE_RATE, split
 
 logger = logging.getLogger(__name__)
-
-SAMPLE_RATE = 16000
-# GigaAM рассчитан на фразы до ~25 с; длиннее — режем по паузам.
-_MAX_CHUNK_S = 22
-_MIN_CHUNK_S = 15
 
 Recognizer = Callable[[np.ndarray], str]
 
@@ -103,27 +99,12 @@ async def warmup() -> None:
         logger.exception("STT не загрузился")
 
 
-def _chunks(audio: np.ndarray) -> list[np.ndarray]:
-    """Длинную запись — на куски до _MAX_CHUNK_S, разрез в самом тихом месте
-    окна [_MIN_CHUNK_S, _MAX_CHUNK_S], чтобы не рубить слово пополам."""
-    frame = SAMPLE_RATE // 10
-    out = []
-    while len(audio) > _MAX_CHUNK_S * SAMPLE_RATE:
-        window = audio[_MIN_CHUNK_S * SAMPLE_RATE : _MAX_CHUNK_S * SAMPLE_RATE]
-        energy = (window[: len(window) // frame * frame].reshape(-1, frame) ** 2).mean(axis=1)
-        cut = _MIN_CHUNK_S * SAMPLE_RATE + int(energy.argmin()) * frame + frame // 2
-        out.append(audio[:cut])
-        audio = audio[cut:]
-    out.append(audio)
-    return out
-
-
 def _transcribe_sync(path: Path) -> str:
     audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
     recognize = _model()
     if settings.stt_engine == "whisper":
         return recognize(audio).strip()
-    return " ".join(recognize(chunk).strip() for chunk in _chunks(audio)).strip()
+    return " ".join(recognize(chunk).strip() for chunk in split(audio)).strip()
 
 
 async def transcribe(path: Path) -> str:

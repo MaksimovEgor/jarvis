@@ -1,0 +1,26 @@
+[Unit]
+Description=Jarvis резервная LLM (Ollama на GTX 1050: модель грузится по запросу, выгружается через 5 мин простоя)
+After=network-online.target
+
+[Service]
+Type=simple
+# Бинарь — из релиза GitHub в ~/.local/ollama (без sudo), см. README.
+ExecStart=%h/.local/ollama/bin/ollama serve
+Environment=OLLAMA_HOST=127.0.0.1:11434
+# RAM на asus — узкое место: одна модель, один запрос, без запаса «на всякий».
+Environment=OLLAMA_KEEP_ALIVE=5m
+Environment=OLLAMA_MAX_LOADED_MODELS=1
+Environment=OLLAMA_NUM_PARALLEL=1
+# KV-кэш в q8: вдвое меньше fp16 без потери качества. q4 пробовали — маленькие
+# модели от него несут бессвязный текст («Булгакововым»), не включать.
+Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0
+# Предохранитель: перерасход — OOM убьёт модель, а не утащит в своп весь asus.
+MemoryHigh=2G
+MemoryMax=2500M
+MemorySwapMax=0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     stt_model_size: str = "small"
     stt_compute_type: str = "int8"
     stt_language: str = "ru"
+    # Расшифровки длинного аудио (app/services/transcribe.py) — кэш текстов.
+    transcripts_dir: str = "data/transcripts"
 
     # TTS — Vosk (нейроголос локально на asus, основной), Edge (Microsoft через
     # SOCKS-туннель — нестабилен), Piper — запасной, всегда локально.
@@ -77,7 +79,9 @@ class Settings(BaseSettings):
     music_library_db: str = "data/music/library.db"
     # Профиль Hermes «dj» — музыкальный вкус и рекомендации (app/music/taste.py).
     # Недоступен — тот же запрос уходит в LLM_*, а волна играет и без него.
-    dj_hermes_url: str = "http://127.0.0.1:8643"
+    # С Hermes 0.21.5 один gateway на хост обслуживает все профили: dj — по префиксу /p/dj
+    # на основном API (:8642) со своим ключом (API_SERVER_KEY из ~/.hermes/profiles/dj/.env).
+    dj_hermes_url: str = "http://127.0.0.1:8642/p/dj"
     dj_hermes_api_key: str = ""
     # Яндекс Музыка (app/music/yandex.py): токен появляется после входа кодом
     # устройства из «Моей музыки», поэтому в файле, а не в .env.
@@ -87,6 +91,15 @@ class Settings(BaseSettings):
     core_url: str = "http://127.0.0.1:8000"
 
     session_history_limit: int = 20
+
+    # Резервная локальная LLM (Ollama, jarvis-llm.service) — app/services/llm.py.
+    # jarvis-local — Qwen2.5-3B-Instruct IQ3_XS, контекст 8k, num_gpu 99: целиком
+    # в 2 ГБ GTX 1050 (1,6 ГБ), ~19 токенов/с, инструменты зовёт (Modelfile, README).
+    local_llm_url: str = "http://127.0.0.1:11434/v1"
+    local_llm_model: str = "jarvis-local"
+    # auto — облако, при отказе локальная; local — сразу локальная, без Hermes.
+    # Меняется на лету голосом («переключись на локальную модель»), не из .env.
+    llm_mode: Literal["auto", "local"] = "auto"
 
     # Вход в веб снаружи (app/web_auth.py): bcrypt-хэш пароля (тот, что был в
     # basic auth Caddy). Пусто — без входа (локальная разработка).

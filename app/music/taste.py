@@ -1,7 +1,7 @@
 """Музыкальный вкус: профиль Hermes «dj» думает, волна (wave.py) играет.
 
 dj — отдельный профиль Hermes со своими SOUL и памятью (scripts/hermes-dj/,
-свой gateway на :8643). Всё здесь — в фоне, волна его никогда не ждёт:
+на основном gateway Hermes по префиксу /p/dj). Всё здесь — в фоне, волна его никогда не ждёт:
 
     refresh_seeds_soon(slot, mood) ─► dj: «что ставить вечером в среду» ─► library.seeds
     tag_soon(ref)  (лайк)          ─► dj: энергия 1-5, жанры (пачкой)   ─► library.tracks

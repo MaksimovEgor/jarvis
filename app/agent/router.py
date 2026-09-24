@@ -18,6 +18,7 @@ import re
 import time
 from dataclasses import dataclass
 
+from app.config import settings
 from app.music import devices, wave_spec, yandex
 from app.music.models import Kind
 from app.music.wave import spec_mood
@@ -35,6 +36,10 @@ class FastReply:
     text: str
     tool: str
 
+
+# Режим «мозга» (app/services/llm.py): локальная модель на GPU или облако.
+_LLM_LOCAL = re.compile(r"^(?:переключись|перейди|включи)\s+(?:на\s+)?(?:локальн\w*|офлайн\w*|оффлайн\w*)(?:\s+(?:модель|мозг|режим|нейросеть))?$")
+_LLM_CLOUD = re.compile(r"^(?:переключись|перейди|вернись)\s+(?:на\s+|в\s+)?(?:облак\w*|облачн\w*|основн\w*|обычн\w*)(?:\s+(?:модель|мозг|режим|нейросеть))?$")
 
 _PLAY_VERB = r"(?:включи|поставь|сыграй|играй|запусти|вруби)"
 _POLITE = r"(?:\s+(?:мне|пожалуйста|плиз))*"
@@ -140,6 +145,16 @@ def _clock(seconds: float) -> str:
     return time.strftime("%H:%M", time.localtime(time.time() + seconds))
 
 
+def is_player_command(text: str) -> bool:
+    """Команда плееру («включи X», пауза, громче…) — для каналов без устройства
+    (Telegram /local): сказать «не знаю, где включить», а не отдавать модели."""
+    t = _normalize(text)
+    if any(r.match(t) for r in (_PAUSE, _RESUME, _NEXT, _PREV, _LOUDER, _QUIETER, _VOLUME, _RADIO)):
+        return True
+    m = _PLAY.match(t)
+    return bool(m) and not _NOT_MEDIA.match(m.group(1))
+
+
 async def try_fast(text: str, device: str) -> FastReply | None:
     try:
         return await _try_fast(text, device)
@@ -150,9 +165,16 @@ async def try_fast(text: str, device: str) -> FastReply | None:
 
 
 async def _try_fast(text: str, device: str) -> FastReply | None:
+    t = _normalize(text)
+    # До проверки устройства: режим общий, и «включи локальную…» — не музыка.
+    if _LLM_LOCAL.match(t):
+        settings.llm_mode = "local"
+        return FastReply("Перешёл на локальную модель: отвечаю сам на видеокарте, без облака. Поиск в интернете работает, но отвечаю проще.", "llm_mode")
+    if _LLM_CLOUD.match(t):
+        settings.llm_mode = "auto"
+        return FastReply("Вернулся на облачную модель.", "llm_mode")
     if not devices.is_web(device):
         return None  # asus — сервер, играть там нечему; пусть ответит Hermes
-    t = _normalize(text)
     if _COMPOUND.search(t):
         return None
     player = devices.player_for(device)

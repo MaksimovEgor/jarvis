@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from datetime import datetime
 from typing import Literal
@@ -23,8 +25,10 @@ from app.music.library import library
 from app.music.models import Diversity, Kind, Language, Mood, MoodEnergy, Rating, WaveSpec
 from app.music.wave import MOOD_PRESET, spec_mood
 from app.music.player import Player
-from app.services import speaker, telegram
+from app.services import speaker, telegram, transcribe as transcriber
 from app.timers import timers
+
+logger = logging.getLogger(__name__)
 
 NO_DEVICE = "Не знаю, где включить: открой Джарвиса на телефоне или в браузере."
 
@@ -36,7 +40,7 @@ mcp = MCPServer(
         "play_music, resume_listening, play_radio, music_control, seek, set_volume, now_playing. "
         "«Моя волна» и вкус: play_wave, play_liked, rate_track, music_taste_note. "
         "Таймеры и напоминания голосом — set_timer, remind, list_timers, cancel_timer. "
-        "Сказать вслух — announce. Никогда не говори, что действие выполнено, не вызвав "
+        "Сказать вслух — announce. Расшифровать/пересказать видео, подкаст, книгу, запись — transcribe. Никогда не говори, что действие выполнено, не вызвав "
         "инструмент. Результат перескажи коротко."
     ),
 )
@@ -326,3 +330,52 @@ async def announce(text: str) -> str:
     """Сказать фразу вслух прямо сейчас (с сигналом, музыка на это время
     встаёт на паузу). Экран свёрнут — пуш, подписки нет — Telegram."""
     return await speaker.announce(text, devices.current_device() or devices.ASUS)
+
+
+# Hermes ждёт инструмент до 300 с; дольше — доделываем в фоне и пишем в Telegram.
+TRANSCRIBE_WAIT_S = 240
+TRANSCRIBE_MAX_CHARS = 60_000
+
+
+@mcp.tool()
+async def transcribe(source: str, kind: Kind = "podcast") -> str:
+    """Расшифровать аудио/видео в текст — чтобы пересказать, ответить «о чём
+    там», найти место («на какой минуте про X»). Фразы: «перескажи это видео
+    <ссылка>», «о чём этот подкаст», «о чём был последний выпуск <подкаст>»,
+    «перескажи главу», «что было в голосовом».
+    source:
+      - ссылка (YouTube, SoundCloud и почти любой сайт с видео/аудио);
+      - "current" — то, что сейчас играет у хозяина;
+      - путь к файлу на этом сервере (например, аудио из Telegram);
+      - иначе — поисковый запрос, kind уточняет: podcast или audiobook.
+    Возвращает текст с метками [мм:сс]. Час звука — 2–4 минуты; если дольше,
+    ответит, что пришлёт в Telegram, — тогда позже вызвать снова с тем же
+    source: готовое отдаётся мгновенно. Пересказывай сам, текст целиком не
+    зачитывай."""
+    task = transcriber.start(source, kind)
+    try:
+        result = await asyncio.wait_for(asyncio.shield(task), TRANSCRIBE_WAIT_S)
+    except TimeoutError:
+        task.add_done_callback(_notify_transcribed)
+        return ("Расшифровка ещё идёт (длинная запись). Скажи хозяину, что пришлю в Telegram, "
+                "когда будет готово; потом вызови transcribe с тем же source.")
+    except Exception as exc:  # источник не нашёлся/не скачался — Hermes скажет словами
+        logger.warning("transcribe %r: %s", source, exc)
+        return f"Не получилось: {exc}."
+    if not result.text:
+        return f"«{result.title}»: речи не нашлось (музыка или тишина)."
+    text = result.text
+    if len(text) > TRANSCRIBE_MAX_CHARS:
+        text = text[:TRANSCRIBE_MAX_CHARS] + f"\n… (обрезано; весь текст — в файле {result.path})"
+    return f"«{result.title}» — расшифровка:\n{text}"
+
+
+def _notify_transcribed(task: asyncio.Task[transcriber.Transcript]) -> None:
+    if task.cancelled():
+        return
+    if exc := task.exception():
+        message = f"Расшифровка не удалась: {exc}"
+    else:
+        message = f"Расшифровка «{task.result().title}» готова — спроси меня о ней."
+    notify = asyncio.ensure_future(telegram.send(message))
+    notify.add_done_callback(lambda t: t.exception() and logger.warning("Telegram: %s", t.exception()))

@@ -10,6 +10,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
+import httpx
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,10 +25,10 @@ from app.config import settings
 from app.mcp_server import mcp
 from app.music import devices, library_api, media, taste, web_player, yandex
 from app.schemas import (
-    AudioChatResponse, AudioMore, CancelRequest, ClientLog, PushSubscribeRequest, PushUnsubscribeRequest,
-    TextChatRequest, TextChatResponse,
+    AudioChatResponse, AudioMore, CancelRequest, ClientLog, LocalChatRequest, PushSubscribeRequest,
+    PushUnsubscribeRequest, TextChatRequest, TextChatResponse,
 )
-from app.services import speaker, speech, stt, tts, webpush
+from app.services import local_chat, speaker, speech, stt, transcribe, tts, webpush
 from app.services.speech import Spoken
 from app.services.hermes import run_hermes
 from app.timers import timers
@@ -64,7 +65,7 @@ app.include_router(media.router)
 app.include_router(web_player.router)
 app.include_router(library_api.router)
 
-_LOCAL_ONLY = ("/mcp", "/music", "/admin")
+_LOCAL_ONLY = ("/mcp", "/music", "/admin", "/stt", "/local")
 
 
 class _LocalOnly:
@@ -125,8 +126,14 @@ async def _answer(
     else:
         # На время хода MCP-инструменты играют и ставят таймеры на этом устройстве.
         with devices.turn(device):
-            if settings.agent_backend == "hermes":
-                reply, tools = await run_hermes(session_id, text, progress)
+            if settings.agent_backend == "hermes" and settings.llm_mode != "local":
+                try:
+                    reply, tools = await run_hermes(session_id, text, progress)
+                except Exception:
+                    # Кончились деньги у провайдера Hermes, он лёг — Джарвис не немеет:
+                    # отвечает свой агент (облако LLM_*, не ответило — локальная модель).
+                    logger.exception("Hermes не ответил — отвечает запасной агент")
+                    reply, tools = await run_agent(_sessions.setdefault(session_id, []), text)
             else:
                 reply, tools = await run_agent(_sessions.setdefault(session_id, []), text)
     return reply, tools, await speech.speak(reply, inline) if speak else None
@@ -279,6 +286,37 @@ async def chat_text(req: TextChatRequest) -> TextChatResponse:
 async def chat_cancel(req: CancelRequest) -> dict:
     """Отменить одну просьбу (turn_id, ✕ в чате) или все просьбы сессии."""
     return {"cancelled": turns.cancel(req.session_id, req.turn_id)}
+
+
+@app.post("/stt/transcribe")
+async def stt_transcribe(file: UploadFile) -> Response:
+    """Голосовые и аудио из Telegram: Hermes расшифровывает их этим эндпоинтом
+    (stt-провайдер command в ~/.hermes/config.yaml, README). Длинное — GPU."""
+    suffix = Path(file.filename or "in.ogg").suffix or ".ogg"
+    with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp.flush()
+        text = await transcribe.transcribe_file(Path(tmp.name))
+    logger.info("STT (Telegram): %s", text[:200])
+    return Response(text, media_type="text/plain; charset=utf-8")
+
+
+@app.post("/local/chat")
+async def local_chat_endpoint(req: LocalChatRequest) -> Response:
+    """Чат с локальной моделью мимо Hermes (Telegram: /local, scripts/hermes-local/).
+    Текст «новый»/«сброс» — забыть историю этого session_id."""
+    text = req.text.strip()
+    if text.lower() in {"новый", "сброс", "new", "reset"}:
+        local_chat.reset(req.session_id)
+        return Response("Начали заново.", media_type="text/plain; charset=utf-8")
+    if not text:
+        return Response("Напиши после /local вопрос, например: /local придумай тост", media_type="text/plain; charset=utf-8")
+    try:
+        reply = await local_chat.ask(req.session_id, text)
+    except httpx.HTTPError as exc:
+        logger.warning("Локальная LLM недоступна: %s", exc)
+        reply = "Локальная модель сейчас недоступна (jarvis-llm на asus)."
+    return Response(reply, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/chat/history")

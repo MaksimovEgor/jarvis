@@ -137,7 +137,7 @@ Hermes ─MCP─► devices.current_player() ◄──────────�
 «включи музыку» ─► Wave (app/music/wave.py) — решает мгновенно, без LLM
                     ├ лайки + радио YouTube Music + поиск по зёрнам dj
                     └ compose(): время суток, настроение, баны, штрафы
-                 ◄─ taste.py (фоном) ◄─► Hermes профиль «dj» :8643 (своя память)
+                 ◄─ taste.py (фоном) ◄─► Hermes профиль «dj» :8642/p/dj (своя память)
 лайк/дизлайк ─► library.db (SQLite) + storage: liked/ навсегда, cache/ LRU, всего 10 ГБ
 ```
 
@@ -216,6 +216,76 @@ iPhone/Mac ─https─► Caddy на point ─► 127.0.0.1:<порт> ─ssh -R
   listener) забирает `GET /tts/chunk/<id>/<n>`. Каждый кусок не больше чем
   вдвое длиннее предыдущего — успевает синтезироваться, пока тот звучит.
 - Образцы голосов: `/voice-samples/` (лежат только на asus в web/dist).
+
+## GPU: расшифровка и резервная LLM
+
+Видеокарта (GTX 1050, 2 ГБ) постоянно ничего не держит: CUDA в процессе стоит
+~0,65 ГБ RAM, а память на asus — узкое место. Задачи берут её на время
+(`app/services/gpu.py` — общий lock):
+
+```
+Hermes ─MCP transcribe(source)─► app/services/transcribe.py
+  source: ссылка | "current" | путь | поиск подкаста/книги
+      ≤90 с → GigaAM ядра (CPU);  длиннее → python -m app.transcribe_worker (cuda, иначе cpu)
+      → data/transcripts/<ключ>.txt, строки «[мм:сс] текст», повтор — из кэша
+Telegram-голосовые ─ stt command в Hermes ─► POST /stt/transcribe ─► то же
+```
+
+- Скорость: 28 мин лекции — 43 с на GPU (+ скачивание). Дольше 240 с —
+  инструмент отвечает «пришлю в Telegram» и дорабатывает в фоне.
+- Hermes (`~/.hermes/config.yaml`): `stt.provider: jarvis` — command-провайдер
+  `curl -sf -F file=@{input_path} http://127.0.0.1:8000/stt/transcribe -o {output_path}`.
+
+Локальная LLM — Ollama в `~/.local/ollama` (релиз с GitHub, без sudo), юнит
+`jarvis-llm.service` (лимит 2,5 ГБ RAM: перерасход убивает модель, а не сервер).
+Модель `jarvis-local` — Qwen2.5-3B-Instruct в сжатии IQ3_XS, **целиком на GPU**:
+1,6 ГБ VRAM, ~19 токенов/с, ответ 1–3 с (с поиском 4–7 с). Грузится по запросу
+(~10 с), выгружается через 5 мин простоя.
+
+Инструмент выбирает код, а не модель: сама 3B-модель в IQ3 зовёт поиск через раз
+и выдумывает факты («Мастера и Маргариту» написал Бунин):
+
+```
+вопрос ─► router: «включи / пауза / громче…» ──────────► плеер (без LLM)
+       ─► orchestrator._run_local:
+            «включи свет / отправь / напомни…» ─────────► честный отказ готовой фразой
+            «погода / курс / кто / почему / найди…» ────► SearXNG ─► модель пересказывает
+            остальное (творческое, арифметика) ─────────► модель отвечает сама
+
+Telegram: /local <текст> ─► плагин Hermes jarvis-local (LLM Hermes не зовётся) ─► POST /local/chat ─┐
+Джарвис: «переключись на локальную модель» … «вернись на облако» ─────────────────────────────────┼─► run_agent
+облако не ответило (нет денег, 5xx) — автоматически ───────────────────────────────────────────────┘
+```
+
+- Установка:
+  ```
+  ssh asus 'mkdir -p ~/.local/ollama && curl -fL https://github.com/ollama/ollama/releases/download/v0.34.4/ollama-linux-amd64.tar.zst \
+    | tar --zstd -x -C ~/.local/ollama && systemctl --user enable --now jarvis-llm && O=~/.local/ollama/bin/ollama \
+    && printf "FROM hf.co/bartowski/Qwen2.5-3B-Instruct-GGUF:IQ3_XS\nPARAMETER num_ctx 8192\nPARAMETER num_gpu 99\n" > /tmp/Modelfile \
+    && $O create jarvis-local -f /tmp/Modelfile; rm -f /tmp/Modelfile'
+  ssh asus 'bash -s' < scripts/hermes-local/setup.sh   # команда /local в Hermes
+  ```
+- `num_gpu 99` обязателен: сама Ollama оставляет слишком большой запас и кладёт
+  на GPU ~70% слоёв, хотя модель целиком влезает (1,6 из 1,9 ГБ).
+- Выбор модели (замеры 2026-09-24, 8–12 вопросов с инструментами):
+  | модель | GPU | ток/с | инструменты сама |
+  |---|---|---|---|
+  | qwen2.5:3b Q4 | 42% (58% CPU, +1–1,5 ГБ RAM) | 11 | да |
+  | **Qwen2.5-3B IQ3_XS** | **100%, 1,6 ГБ** | **19** | через раз → выбирает код |
+  | Qwen2.5-3B IQ3_M | 100%, 1,7 ГБ | — | хуже XS, факты путает |
+  | Vikhr-Qwen-2.5-1.5B Q4 | 100%, 1,2 ГБ | 36 | нет (лучший русский) |
+  | qwen3:4b | не влезает | — | — |
+- Пустые ответы: IQ3 часто первым токеном выдаёт конец ответа — ChainLLM.local
+  повторяет до 3 раз.
+- Ollama 0.34 собран и под CUDA 13 (Pascal там нет), но GTX 1050 берёт из
+  `cuda_v12` — в логе «skipping CUDA device» про v13, это не ошибка.
+- KV-кэш только q8 (в юните): на q4 маленькие модели несут бессвязный текст.
+- Модель в GPU (1,6 ГБ) и расшифровка (~1 ГБ) вместе не влезают: воркер
+  получает CUDA OOM и уходит на CPU сам (проверено: 77 мин аудио за 307 с).
+- Hermes на локальную не переключается и не должен: ему нужно окно ≥64k
+  токенов, а постоянная часть промпта — ~14,5 тыс. На GTX 1050 кэш такого
+  окна не влезает — модель даже не загружается (проверено 2026-09-24).
+  Поэтому из Telegram — только /local, мимо LLM Hermes.
 
 ## Быстрые команды, история, Telegram
 

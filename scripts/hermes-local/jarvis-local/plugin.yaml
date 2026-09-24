@@ -1,0 +1,4 @@
+name: jarvis-local
+version: 1.0.0
+description: "/local <текст> — ответ локальной модели Джарвиса (Ollama на GPU asus) мимо LLM Hermes: без токенов облака."
+author: "Jarvis"

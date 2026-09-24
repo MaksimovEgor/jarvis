@@ -67,3 +67,9 @@ class PushUnsubscribeRequest(BaseModel):
 class ClientLog(BaseModel):
     device: str
     message: str
+
+
+class LocalChatRequest(BaseModel):
+    """/local/chat — чат с локальной моделью мимо Hermes (Telegram: /local)."""
+    session_id: str = "telegram"
+    text: str
