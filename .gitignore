@@ -4,3 +4,6 @@ __pycache__/
 .env
 data/models/
 data/music/
+
+# Локальная доска координации агентов
+AGENT_STATUS.md

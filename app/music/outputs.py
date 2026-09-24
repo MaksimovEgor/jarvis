@@ -102,7 +102,7 @@ class MpvOutput(Output):
         if track.source == "youtube" and track.is_long:
             # Часы звука не качаем целиком — поток через прокси ядра.
             return f"{settings.core_url}/media/yt/{track.ref}"
-        if sources.is_song(track):
+        if sources.is_downloadable(track):
             return str(await sources.download(track))
         return track.ref
 
@@ -145,7 +145,7 @@ class MpvOutput(Output):
         return metadata.get("icy-title")
 
     def prefetch(self, track: Track) -> None:
-        if sources.is_song(track):
+        if sources.is_downloadable(track):
             task = asyncio.create_task(sources.download(track))
             task.add_done_callback(lambda t: t.cancelled() or t.exception())  # ошибку увидим при проигрывании
 
@@ -235,6 +235,10 @@ class WebOutput(Output):
     def announce(self, url: str) -> None:
         self._push({"type": "announce", "url": url})
 
+    def show(self, what: str) -> None:
+        """Открыть на экране текст/очередь — «Джарвис, покажи текст»."""
+        self._push({"type": "ui", "open": what})
+
     def notify(self, event: dict[str, Any]) -> None:
         """События ходов экрану (app/turns.py) — с номером и в журнал для повтора."""
         self._event_id += 1
@@ -283,7 +287,7 @@ class WebOutput(Output):
     async def _src(self, track: Track) -> str:
         if track.source == "youtube" and track.is_long:
             return f"media/hls/{track.ref}/index.m3u8" if self._hls else f"media/yt/{track.ref}"
-        if sources.is_song(track):
+        if sources.is_downloadable(track):
             # Песня — сначала на диск (~1-3 с): исправленный yt-dlp файл или
             # MP3/FLAC Яндекса iPhone играет, а сырой поток YouTube (DASH) — нет.
             await sources.download(track)
@@ -381,6 +385,6 @@ class WebOutput(Output):
         return self._volume
 
     def prefetch(self, track: Track) -> None:
-        if sources.is_song(track):
+        if sources.is_downloadable(track):
             task = asyncio.create_task(sources.download(track))
             task.add_done_callback(lambda t: t.cancelled() or t.exception())

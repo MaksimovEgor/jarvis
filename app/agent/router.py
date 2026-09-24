@@ -57,6 +57,10 @@ _LIKED = re.compile(
     rf"^{_PLAY_VERB}{_POLITE}\s+(?:мою\s+музыку|мои\s+лайки|лайки|лайкнут\w*(?:\s+(?:песни|треки))?|"
     r"(?:мо[июе]\s+)?любим\w*(?:\s+(?:музыку|песни|треки))?|избранн\w*)$"
 )
+_LYRICS = re.compile(
+    r"^(?:покажи|открой|выведи)\s+(?:мне\s+)?(?:текст|слова)(?:\s+(?:песни|трека))?$|"
+    r"^(?:что|о\s+чем)\s+(?:он|она|они)\s+(?:поет|поют)$|^какие\s+(?:там\s+)?слова$"
+)
 _RESUME_BOOK = re.compile(r"^(?:продолжи|продолжай|давай\s+дальше)\s+(?:слушать\s+)?(?:аудио)?книгу$")
 _TIMER = re.compile(r"^(?:поставь\s+|заведи\s+|засеки\s+)?таймер\s+на\s+(.+)$")
 _RADIO = re.compile(rf"^{_PLAY_VERB}{_POLITE}\s+радио(?:станцию)?(?:\s+(.+))?$")
@@ -169,6 +173,11 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
         return FastReply(await player.volume(delta=-15), "volume")
     if m := _VOLUME.match(t):
         return FastReply(await player.volume(level=int(m.group(1))), "volume")
+    if _LYRICS.match(t):
+        if player.current is None:
+            return FastReply("Сейчас ничего не играет.", "show_lyrics")
+        devices.web_output(device).show("lyrics")
+        return FastReply("Показываю текст.", "show_lyrics")
     if _LIKE.match(t):
         return FastReply(await player.rate(1), "rate_track")
     if _DISLIKE.match(t):

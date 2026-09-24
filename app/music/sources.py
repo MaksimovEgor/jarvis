@@ -85,9 +85,15 @@ async def resolve(query: str, kind: Kind = "music") -> list[Track]:
     return _rank(query, ranked + await _safe(youtube.soundcloud_search(query), "SoundCloud"))
 
 
-def is_song(track: Track) -> bool:
-    """Песня, которую можно оценить, скачать и записать в журнал (не радио, не книга)."""
+def is_downloadable(track: Track) -> bool:
+    """Играется файлом с диска: всё с Яндекса и SoundCloud (и книги Яндекса —
+    главы качаются целиком), короткое с YouTube. Длинное с YouTube — потоком."""
     return track.source in ("yandex", "soundcloud") or (track.source == "youtube" and not track.is_long)
+
+
+def is_song(track: Track) -> bool:
+    """Песня: её оценивают, пишут в журнал волны (не радио, не книга, не подкаст)."""
+    return is_downloadable(track) and track.kind == "music"
 
 
 async def download(track: Track, liked: bool = False, timeout: float = 180) -> Path:
@@ -95,7 +101,7 @@ async def download(track: Track, liked: bool = False, timeout: float = 180) -> P
     if track.source == "yandex":
         if path := storage.path_for(track.ref):
             return path
-        folder = storage.liked_dir() if liked else storage.cache_dir()
+        folder = storage.liked_dir() if liked and track.kind == "music" else storage.cache_dir()
         path = await asyncio.wait_for(yandex.download(track.ref, folder, "lossless" if liked else "mp3"), timeout)
         if not liked:
             storage.prune(keep=path)

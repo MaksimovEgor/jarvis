@@ -23,9 +23,9 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.music import devices, storage, yandex
+from app.music import catalog, devices, lyrics, storage, yandex
 from app.music.library import TrackInfo, library
-from app.music.models import Diversity, Language, Mood, MoodEnergy, Rating, WaveSpec
+from app.music.models import Diversity, Entity, EntityType, Language, Mood, MoodEnergy, Rating, SearchTab, WaveSpec
 from app.music.wave import MOOD_PRESET, spec_mood
 from app.music.web_player import _web_device
 
@@ -53,12 +53,21 @@ class WaveSettings(BaseModel):
     label: str = ""
 
 
+class EntityIn(BaseModel):
+    """Результат поиска, который прислал экран обратно — «включи это»."""
+    source: Literal["yandex", "youtube", "soundcloud"]
+    type: EntityType
+    id: str
+    title: str = ""
+
+
 class PlayRequest(BaseModel):
     device: str
-    mode: Literal["wave", "liked", "track"]
+    mode: Literal["wave", "liked", "track", "entity", "next"]
     mood: Mood = "auto"
     ref: str | None = None
     wave: WaveSettings | None = None
+    entity: EntityIn | None = None
 
 
 def _out(info: TrackInfo) -> dict:
@@ -84,9 +93,32 @@ async def play(req: PlayRequest) -> dict:
         text = await player.play_wave(spec_mood(spec), spec=spec)
     elif req.mode == "liked":
         text = await player.play_liked()
+    elif req.mode == "entity" and req.entity:
+        text = await player.play_entity(Entity(**req.entity.model_dump()))
+    elif req.mode == "next" and req.entity:
+        tracks, _ = await catalog.resolve_entity(Entity(**req.entity.model_dump()))
+        text = await player.add_next(tracks[0]) if tracks else "Не нашёл этот трек."
     else:
         text = await player.play_ref(req.ref or "")
     return {"status": "ok", "text": text}
+
+
+def _entity_out(e: Entity) -> dict:
+    return {
+        "source": e.source, "type": e.type, "id": e.id, "title": e.title, "subtitle": e.subtitle,
+        "cover": e.cover, "coverCrop": e.cover_crop,
+        "rating": library.rating(e.id) if e.type == "track" else None,
+    }
+
+
+@router.get("/search")
+async def search(q: str = "", tab: SearchTab = "yandex") -> dict:
+    try:
+        sections = await catalog.search(q, tab)
+    except Exception as exc:
+        return {"sections": [], "error": str(exc)[:200]}
+    return {"sections": [{"kind": s.kind, "title": s.title, "items": [_entity_out(e) for e in s.items]}
+                         for s in sections]}
 
 
 @router.get("/likes")
@@ -108,6 +140,19 @@ async def hidden() -> dict:
 @router.post("/unmute")
 async def unmute(req: UnmuteRequest) -> dict:
     return {"status": "ok", "restored": library.unmute_artist(req.artist)}
+
+
+@router.get("/lyrics")
+async def track_lyrics(ref: str) -> dict:
+    """Текст трека: synced — [{t, line}] для подсветки, иначе plain."""
+    info = library.track(ref)
+    if info is None:
+        return {"synced": None, "plain": None, "source": None}
+    found = await lyrics.get(info.track())
+    return {
+        "synced": [{"t": t, "line": line} for t, line in found.synced] if found.synced else None,
+        "plain": found.plain, "source": found.source,
+    }
 
 
 @router.get("/storage")

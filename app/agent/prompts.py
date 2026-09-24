@@ -37,6 +37,7 @@ where: here (по умолчанию), everywhere — везде;
 mood_energy: active, fun, calm, sad; character: favorite, discover, popular; language: russian, \
 not-russian, without-words; activity: wake-up, run, workout, driving, road-trip, work-background, \
 study-background, party, romantic-date, beloved, fall-asleep; station: genre:rusrock, epoch:nineties…;
+- mcp__jarvis__show_lyrics() — «покажи текст», «что он поёт»: текст песни на экране;
 - mcp__jarvis__play_liked(query?) — «включи мои лайки», «любимое»;
 - mcp__jarvis__rate_track(value, which?) — like / dislike / none; which=previous — \
 «лайкни прошлую»; дизлайк сам переключает трек;

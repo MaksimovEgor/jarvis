@@ -4,6 +4,7 @@
                                      изменении, объявления таймеров, перемотка
     POST /player/report            — браузер: позиция, пауза, конец/ошибка трека
     POST /player/control           — кнопки статусбара и экрана блокировки
+    GET  /player/queue, POST /player/queue/{move,remove,play} — экран «Очередь»
 """
 
 from __future__ import annotations
@@ -50,6 +51,38 @@ class PlayerControl(BaseModel):
     device: str
     action: Literal["pause", "resume", "next", "previous", "stop", "seek"]
     position: float | None = None
+
+
+class QueueAction(BaseModel):
+    device: str
+    index: int = 0
+    to: int = 0
+
+
+@router.get("/queue")
+async def queue(device: str) -> dict:
+    return devices.player_for(_web_device(device)).queue_view()
+
+
+@router.post("/queue/move")
+async def queue_move(req: QueueAction) -> dict:
+    player = devices.player_for(_web_device(req.device))
+    await player.queue_move(req.index, req.to)
+    return player.queue_view()
+
+
+@router.post("/queue/remove")
+async def queue_remove(req: QueueAction) -> dict:
+    player = devices.player_for(_web_device(req.device))
+    await player.queue_remove(req.index)
+    return player.queue_view()
+
+
+@router.post("/queue/play")
+async def queue_play(req: QueueAction) -> dict:
+    player = devices.player_for(_web_device(req.device))
+    text = await player.play_at(req.index)
+    return {**player.queue_view(), "text": text}
 
 
 @router.get("/events")

@@ -35,7 +35,9 @@ from typing import Any, Literal
 from app.config import settings
 from app.music import positions, radio, sources, storage, taste, yandex, youtube
 from app.music.library import artist_key, library
-from app.music.models import MOOD_RU, SLOT_RU, FromWhere, Kind, Mood, Outcome, Rating, Track, WaveSpec, split_title
+from app.music.models import (
+    MOOD_RU, SLOT_RU, Entity, FromWhere, Kind, Mood, Outcome, Rating, Track, WaveSpec, split_title,
+)
 from app.music.outputs import Output
 from app.music.wave import AHEAD, REFILL_BELOW, Wave
 
@@ -75,6 +77,8 @@ def _display(track: Track) -> dict[str, Any]:
         cover = f"media/cover/{track.ref}" if track.source == "youtube" else None
         return {"song": track.title, "artist": None, "cover": cover, "coverCrop": True,
                 "service": {"radio": "Радио", "local": "Файл"}.get(track.source, "YouTube"), "note": None}
+    if track.cover and track.source != "youtube":
+        library.upsert(track)  # /media/cover берёт обложку Яндекса из библиотеки
     artist = track.artist or youtube.meta(track.ref)[0]
     if artist is None and (info := library.track(track.ref)) is not None:
         artist = info.artist
@@ -190,7 +194,7 @@ class Player:
         for i in range(index, min(index + MAX_SKIPS, len(self._queue))):
             track = self._queue[i]
             where: FromWhere | None = None
-            if sources.is_song(track):
+            if sources.is_downloadable(track):
                 where = storage.where(track.ref)
             elif track.source == "youtube":
                 where = "stream"  # длинное с YouTube — потоком
@@ -304,6 +308,18 @@ class Player:
     async def play_query(self, query: str, kind: Kind = "music") -> str:
         """Песня/исполнитель по запросу: Яндекс, чего нет — YouTube, SoundCloud
         (sources.resolve); дальше похожие того же источника."""
+        if kind != "music" and yandex.is_on():
+            # Книги и подкасты — сначала каталог Яндекса (главы по порядку, с места остановки).
+            from app.music import catalog
+
+            try:
+                sections = await catalog.search(query, "books" if kind == "audiobook" else "podcasts")
+            except Exception:
+                logger.warning("Яндекс не нашёл книгу/подкаст «%s»", query, exc_info=True)
+                sections = []
+            found = next((e for sec in sections for e in sec.items if e.source == "yandex"), None)
+            if found is not None:
+                return await self.play_entity(found)
         async with self._lock:
             candidates = await sources.resolve(query, kind)
             if kind == "music":
@@ -405,6 +421,78 @@ class Player:
             self.wave = None
             track = await self._start_queue([Track(title=p.stem, source="local", ref=str(p)) for p in files])
         return f"Включаю {track.title}, всего {len(files)} в очереди."
+
+    # --- поиск и очередь ----------------------------------------------------
+
+    async def play_entity(self, entity: Entity) -> str:
+        """Найденное в поиске: трек (дальше похожие), исполнитель, альбом,
+        плейлист, книга (с недослушанной главы), подкаст (с последнего выпуска),
+        станция (волна по ней)."""
+        from app.music import catalog  # catalog → player нет, но держим импорт ленивым
+
+        if entity.type == "station":
+            spec = WaveSpec(station=entity.id, label=entity.title.lower())
+            return await self.play_wave("auto", spec=spec)
+        tracks, start = await catalog.resolve_entity(entity)
+        if not tracks:
+            return f"Не получилось включить «{entity.title}»."
+        async with self._lock:
+            self.wave = None
+            await self._close_play("stopped")
+            await self._save_position()
+            self._generation += 1
+            self._queue, self._pos = tracks, -1
+            track = await self._play_index(start)
+            generation = self._generation
+        if entity.type == "track":
+            asyncio.create_task(self._extend_with_mix(track, generation))
+        if track.is_long:
+            begin = positions.start_for(track)
+            return f"Включаю «{track.title}»" + (f" с {_clock(begin)}." if begin else ".")
+        return f"Включаю: {track.title}."
+
+    async def add_next(self, track: Track) -> str:
+        """«Играть следующим» — сразу за текущим; ничего не играет — включить."""
+        async with self._lock:
+            if self.current is None:
+                self._queue, self._pos = [track], -1
+                await self._play_index(0)
+                return f"Включаю: {track.title}."
+            self._queue.insert(self._pos + 1, replace(track, origin="query"))
+            self.output.prefetch(track)
+            self._publish_upcoming()
+        return f"Следующим: {track.title}."
+
+    def queue_view(self) -> dict[str, Any]:
+        return {
+            "pos": self._pos,
+            "tracks": [{"ref": t.ref, **_display(t)} for t in self._queue],
+        }
+
+    async def queue_move(self, src: int, dst: int) -> None:
+        """Переставить трек в будущей части очереди; текущий и сыгранные не трогаем."""
+        async with self._lock:
+            lo = self._pos + 1
+            if not (lo <= src < len(self._queue) and lo <= dst < len(self._queue)):
+                return
+            self._queue.insert(dst, self._queue.pop(src))
+            if lo in (src, dst):
+                self.output.prefetch(self._queue[lo])
+            self._publish_upcoming()
+
+    async def queue_remove(self, index: int) -> None:
+        async with self._lock:
+            if self._pos < index < len(self._queue):
+                del self._queue[index]
+                self._publish_upcoming()
+
+    async def play_at(self, index: int) -> str:
+        async with self._lock:
+            if not 0 <= index < len(self._queue) or index == self._pos:
+                return "Уже играет." if index == self._pos else "Нет такого трека в очереди."
+            await self._close_play()
+            track = await self._play_index(index)
+        return f"Включаю: {track.title}."
 
     # --- оценки -----------------------------------------------------------
 

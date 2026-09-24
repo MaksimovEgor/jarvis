@@ -76,3 +76,15 @@ def unfinished(query: str | None = None) -> list[Position]:
     needle = (query or "").lower()
     items = [p for p in _load().values() if not p.finished and p.position > 0 and needle in p.title.lower()]
     return sorted(items, key=lambda p: p.updated, reverse=True)
+
+
+def resume_index(tracks: list[Track]) -> int:
+    """С какой главы продолжать книгу: начатая последней недослушанная, иначе
+    следующая за последней дослушанной, иначе первая."""
+    data = _load()
+    known = [(i, data.get(t.key)) for i, t in enumerate(tracks)]
+    started = [(p.updated, i) for i, p in known if p is not None and not p.finished and p.position > 0]
+    if started:
+        return max(started)[1]
+    done = [i for i, p in known if p is not None and p.finished]
+    return min(max(done) + 1, len(tracks) - 1) if done else 0

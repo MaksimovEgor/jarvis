@@ -42,6 +42,8 @@ export function useMusic(
   const origin = ref<string | null>(null)
   const from = ref<FromWhere | null>(null)
   const meta = ref<TrackMeta | null>(null)
+  // «Джарвис, покажи текст» — ядро просит экран открыть текст/очередь.
+  const uiRequest = ref<{ open: 'lyrics' | 'queue'; at: number } | null>(null)
 
   const audio = new Audio()
   audio.preload = 'auto'
@@ -151,6 +153,9 @@ export function useMusic(
         break
       case 'volume':
         if (volumeSupported) audio.volume = event.level / 100
+        break
+      case 'ui':
+        uiRequest.value = { open: event.open, at: Date.now() }
         break
       case 'announce':
         hold()
@@ -437,6 +442,7 @@ export function useMusic(
     origin,
     from,
     meta,
+    uiRequest,
     blocked,
     like,
     dislike,

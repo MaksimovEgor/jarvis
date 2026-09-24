@@ -2,8 +2,10 @@
 import { computed, ref, toRef } from 'vue'
 
 import { useCoverColor } from '../composables/useCoverColor'
-import type { FromWhere, Rating, TrackMeta } from '../types'
+import type { FromWhere, Panel, Rating, TrackMeta } from '../types'
 import CoverArt from './CoverArt.vue'
+import LyricsView from './LyricsView.vue'
+import QueueView from './QueueView.vue'
 
 const props = defineProps<{
   meta: TrackMeta
@@ -16,6 +18,9 @@ const props = defineProps<{
   rating: Rating
   origin: string | null
   from: FromWhere | null
+  trackRef: string | null
+  // Что под заголовком: обложка, текст песни или очередь.
+  panel: Panel
 }>()
 
 const emit = defineEmits<{
@@ -28,7 +33,16 @@ const emit = defineEmits<{
   seekBy: [delta: number]
   like: []
   dislike: []
+  panel: [panel: Panel]
+  search: []
 }>()
+
+// Очередь перечитывается, когда ядро прислало другое «дальше».
+const queueVersion = computed(() => props.meta.upcoming.map((t) => t.ref).join(','))
+
+function toggle(panel: Panel): void {
+  emit('panel', props.panel === panel ? 'cover' : panel)
+}
 
 const FROM_LABEL: Record<FromWhere, string> = { liked: 'из «Моей музыки»', cache: 'из кэша', net: 'из сети', stream: 'поток' }
 
@@ -106,9 +120,28 @@ function onTouchEnd(): void {
       </button>
     </header>
 
-    <CoverArt class="np__cover" :src="meta.cover" :crop="meta.coverCrop" :live="live" />
+    <div v-if="panel !== 'cover'" class="np__compact">
+      <CoverArt class="np__thumb-lg" :src="meta.cover" :crop="meta.coverCrop" :live="live" />
+      <div class="np__compact-titles">
+        <b>{{ meta.song }}</b>
+        <span>{{ meta.artist ?? '' }}</span>
+      </div>
+      <button
+        v-if="rateable"
+        class="np__round"
+        :class="{ 'np__round--liked': rating === 1 }"
+        :aria-label="rating === 1 ? 'Убрать из моей музыки' : 'Нравится'"
+        @click="emit('like')"
+      >
+        {{ rating === 1 ? '♥' : '♡' }}
+      </button>
+    </div>
+    <LyricsView v-if="panel === 'lyrics'" class="np__panel" :track-ref="trackRef" :position="position" @seek="(t) => emit('seek', t)" />
+    <QueueView v-else-if="panel === 'queue'" class="np__panel" :version="queueVersion" />
 
-    <div class="np__meta">
+    <CoverArt v-if="panel === 'cover'" class="np__cover" :src="meta.cover" :crop="meta.coverCrop" :live="live" />
+
+    <div v-if="panel === 'cover'" class="np__meta">
       <button v-if="rateable" class="np__round" aria-label="Не нравится" @click="emit('dislike')">
         <svg viewBox="0 0 24 24">
           <path d="M15 3H6c-.8 0-1.5.5-1.8 1.2l-3 7.1c-.1.2-.2.5-.2.7v2c0 1.1.9 2 2 2h6.3l-.9 4.6v.3c0 .4.2.8.4 1.1L9.8 23l6.6-6.6c.4-.4.6-.9.6-1.4V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z" />
@@ -136,7 +169,7 @@ function onTouchEnd(): void {
       </button>
     </div>
 
-    <div class="np__badges">
+    <div v-if="panel === 'cover'" class="np__badges">
       <span v-if="rating === 1" class="np__badge np__badge--accent">♥ в «Моей музыке»</span>
       <span v-for="b in badges" :key="b" class="np__badge">{{ b }}</span>
     </div>
@@ -170,7 +203,13 @@ function onTouchEnd(): void {
       </button>
     </div>
 
-    <div v-if="meta.upcoming.length" class="np__next">
+    <nav class="np__tabs">
+      <button :class="{ on: panel === 'lyrics' }" :disabled="!trackRef" @click="toggle('lyrics')">❝ Текст</button>
+      <button :class="{ on: panel === 'queue' }" @click="toggle('queue')">≡ Очередь</button>
+      <button @click="emit('search')">⌕ Поиск</button>
+    </nav>
+
+    <div v-if="panel === 'cover' && meta.upcoming.length" class="np__next">
       <b>{{ origin?.startsWith('волна') ? 'Дальше в волне' : 'Дальше' }}</b>
       <div v-for="t in meta.upcoming" :key="t.ref" class="np__row">
         <CoverArt class="np__thumb" :src="t.cover" :crop="t.coverCrop ?? true" />
@@ -215,6 +254,13 @@ function onTouchEnd(): void {
   // полосу прогресса) — место уступает только «Дальше», его строки прячутся.
   & > * {
     flex-shrink: 0;
+  }
+
+  // Текст и очередь — наоборот: занимают остаток и прокручиваются внутри,
+  // кнопки и полоса прогресса остаются на экране.
+  & > .np__panel {
+    flex: 1 1 0;
+    min-height: 0;
   }
 
   &::before {
@@ -399,7 +445,7 @@ function onTouchEnd(): void {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin: clamp(6px, 1.6dvh, 14px) 0 clamp(12px, 3dvh, 28px);
+    margin: clamp(6px, 1.6dvh, 14px) 0 clamp(10px, 2dvh, 18px);
   }
 
   &__ctl {
@@ -447,6 +493,69 @@ function onTouchEnd(): void {
     }
   }
 
+  &__compact {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+
+    b,
+    span {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    b {
+      font-size: 16px;
+    }
+
+    span {
+      font-size: 13px;
+      color: #c7cfd8;
+    }
+  }
+
+  &__compact-titles {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__thumb-lg {
+    flex: none;
+    width: 52px;
+    height: 52px;
+    border-radius: 10px;
+  }
+
+  &__tabs {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin: 0 0 16px;
+
+    button {
+      padding: 7px 14px;
+      border: none;
+      border-radius: 18px;
+      background: rgb(255 255 255 / 10%);
+      color: inherit;
+      font: inherit;
+      font-size: 14px;
+      cursor: pointer;
+
+      &.on {
+        background: #e7ecf2;
+        color: #0b0f14;
+      }
+
+      &:disabled {
+        opacity: 0.4;
+      }
+    }
+  }
+
   &__next {
     flex: 0 1 auto;
     min-height: 0;
@@ -483,19 +592,19 @@ function onTouchEnd(): void {
   }
 
   // Не влезает — меньше строк, но без прокрутки.
-  @media (max-height: 900px) {
+  @media (max-height: 960px) {
     &__row:nth-of-type(n + 3) {
       display: none;
     }
   }
 
-  @media (max-height: 790px) {
+  @media (max-height: 860px) {
     &__row:nth-of-type(n + 2) {
       display: none;
     }
   }
 
-  @media (max-height: 700px) {
+  @media (max-height: 760px) {
     &__next {
       display: none;
     }

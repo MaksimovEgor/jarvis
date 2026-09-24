@@ -1,4 +1,18 @@
-import type { HiddenArtist, HistoryEntry, LibraryStorage, LibraryTrack, Mood, Rating, WaveSettings, YandexStatus } from './types'
+import type {
+  Entity,
+  HiddenArtist,
+  HistoryEntry,
+  LibraryStorage,
+  LibraryTrack,
+  LyricsData,
+  Mood,
+  QueueData,
+  Rating,
+  SearchSection,
+  SearchTab,
+  WaveSettings,
+  YandexStatus,
+} from './types'
 
 // Озвучка ответа: куски забираются по одному (app/services/speech.py).
 export interface SpeechMore {
@@ -166,6 +180,48 @@ export async function yandexConnect(): Promise<YandexStatus> {
 export async function yandexDisconnect(): Promise<void> {
   await postJson('library/yandex/disconnect', {})
 }
+
+export async function fetchLyrics(ref: string): Promise<LyricsData> {
+  return getJson(`library/lyrics?ref=${encodeURIComponent(ref)}`)
+}
+
+export async function searchCatalog(q: string, tab: SearchTab, signal: AbortSignal): Promise<SearchSection[]> {
+  const resp = await fetch(`library/search?${new URLSearchParams({ q, tab })}`, { signal })
+  if (!resp.ok) throw new Error(`Сервер ответил ${resp.status}`)
+  const data = (await resp.json()) as { sections: SearchSection[]; error?: string }
+  if (data.error) throw new Error(data.error)
+  return data.sections
+}
+
+function entityBody(entity: Entity): Pick<Entity, 'source' | 'type' | 'id' | 'title'> {
+  return { source: entity.source, type: entity.type, id: entity.id, title: entity.title }
+}
+
+export async function playEntity(entity: Entity): Promise<void> {
+  await postJson('library/play', { device: DEVICE_ID, mode: 'entity', entity: entityBody(entity) })
+}
+
+export async function playNext(entity: Entity): Promise<void> {
+  await postJson('library/play', { device: DEVICE_ID, mode: 'next', entity: entityBody(entity) })
+}
+
+export async function fetchQueue(): Promise<QueueData> {
+  return getJson(`player/queue?device=${encodeURIComponent(DEVICE_ID)}`)
+}
+
+async function queueAction(action: 'move' | 'remove' | 'play', index: number, to = 0): Promise<QueueData> {
+  const resp = await fetch(`player/queue/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device: DEVICE_ID, index, to }),
+  })
+  if (!resp.ok) throw new Error(`Сервер ответил ${resp.status}`)
+  return resp.json() as Promise<QueueData>
+}
+
+export const queueMove = (from: number, to: number): Promise<QueueData> => queueAction('move', from, to)
+export const queueRemove = (index: number): Promise<QueueData> => queueAction('remove', index)
+export const queuePlay = (index: number): Promise<QueueData> => queueAction('play', index)
 
 async function getJson<T>(url: string): Promise<T> {
   const resp = await fetch(url)

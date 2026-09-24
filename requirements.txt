@@ -5,6 +5,8 @@ httpx
 python-multipart
 beautifulsoup4
 faster-whisper
+# GigaAM v3 (STT): без extras — onnxruntime-gpu ставит requirements-gpu.txt
+onnx-asr==0.12.0
 piper-tts
 yt-dlp
 mcp>=2.2,<3

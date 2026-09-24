@@ -47,6 +47,11 @@ class WaveSpec:
         return (self.station, self.mood_energy, self.diversity, self.language) == (MY_WAVE, "all", "default", "any")
 
 
+# Поиск по каталогам (app/music/catalog.py): что нашлось и как это включить.
+EntityType = Literal["track", "artist", "album", "playlist", "audiobook", "podcast", "station"]
+SearchTab = Literal["yandex", "youtube", "soundcloud", "books", "podcasts", "kids"]
+
+
 SLOT_RU: dict[Slot, str] = {"morning": "утро", "day": "день", "evening": "вечер", "night": "ночь"}
 MOOD_RU: dict[Mood, str] = {
     "auto": "", "energetic": "бодрое", "calm": "спокойное", "focus": "для работы",
@@ -124,3 +129,18 @@ class Track:
         if self.source == "radio":
             return False
         return self.kind != "music" or (self.duration or 0) > LONG_SECONDS
+
+
+@dataclass(frozen=True)
+class Entity:
+    """Результат поиска. id: трек — ref; Яндекс — id исполнителя/альбома,
+    плейлист «uid:kind», станция «type:tag»."""
+    source: Literal["yandex", "youtube", "soundcloud"]
+    type: EntityType
+    id: str
+    title: str
+    subtitle: str = ""
+    cover: str | None = None
+    cover_crop: bool = False
+    # Для трека — готовый Track, чтобы не искать заново.
+    track: Track | None = None

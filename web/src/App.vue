@@ -8,6 +8,7 @@ import MyMusic from './components/MyMusic.vue'
 import NowPlaying from './components/NowPlaying.vue'
 import PlayerBar from './components/PlayerBar.vue'
 import RateToast from './components/RateToast.vue'
+import SearchScreen from './components/SearchScreen.vue'
 import TalkButton from './components/TalkButton.vue'
 import { useEarcon } from './composables/useEarcon'
 import { useMusic } from './composables/useMusic'
@@ -15,7 +16,7 @@ import { usePlayer } from './composables/usePlayer'
 import { usePush } from './composables/usePush'
 import { useRecorder } from './composables/useRecorder'
 import { useWakeWord } from './composables/useWakeWord'
-import type { Message, Status, TurnEvent, TurnsEvent } from './types'
+import type { Message, Panel, Status, TurnEvent, TurnsEvent } from './types'
 
 const recorder = useRecorder()
 const player = usePlayer()
@@ -40,6 +41,29 @@ const {
 // «Моя музыка» — экран поверх чата; всплывашка после оценки с «Отменить».
 const showLibrary = ref(false)
 const showNowPlaying = ref(false)
+const showSearch = ref(false)
+const nowPanel = ref<Panel>('cover')
+
+function openNowPlaying(panel: Panel = 'cover'): void {
+  nowPanel.value = panel
+  showNowPlaying.value = true
+}
+
+function openSearch(): void {
+  showNowPlaying.value = false
+  showSearch.value = true
+}
+
+// «Джарвис, покажи текст» — ядро прислало событие ui.
+watch(
+  () => music.uiRequest.value,
+  (request) => {
+    if (request && musicMeta.value) {
+      showSearch.value = false
+      openNowPlaying(request.open)
+    }
+  },
+)
 
 function onStop(): void {
   showNowPlaying.value = false
@@ -428,6 +452,11 @@ function errorText(e: unknown): string {
       />
       Джарвис
       <span class="app__spacer" />
+      <button class="app__icon" aria-label="Поиск музыки" title="Поиск: Яндекс, YouTube, SoundCloud, книги, подкасты" @click="openSearch">
+        <svg viewBox="0 0 24 24">
+          <path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z" />
+        </svg>
+      </button>
       <button
         class="app__icon"
         aria-label="Моя музыка"
@@ -471,7 +500,7 @@ function errorText(e: unknown): string {
       :rateable="musicRef !== null"
       :rating="musicRating"
       :origin="musicOrigin"
-      @open="showNowPlaying = true"
+      @open="openNowPlaying()"
       @toggle="music.toggle"
       @next="music.next"
       @like="onLike"
@@ -502,6 +531,10 @@ function errorText(e: unknown): string {
       :rating="musicRating"
       :origin="musicOrigin"
       :from="musicFrom"
+      :track-ref="musicRef"
+      :panel="nowPanel"
+      @panel="(p) => (nowPanel = p)"
+      @search="openSearch"
       @close="showNowPlaying = false"
       @toggle="music.toggle"
       @next="music.next"
@@ -511,6 +544,12 @@ function errorText(e: unknown): string {
       @seek-by="music.seekBy"
       @like="onLike"
       @dislike="onDislike"
+    />
+    <SearchScreen
+      v-if="showSearch"
+      @close="showSearch = false"
+      @played="(text) => showToast(text)"
+      @lyrics="openNowPlaying('lyrics')"
     />
     <MyMusic v-if="showLibrary" @close="showLibrary = false" @played="(text) => showToast(text)" />
     <RateToast v-if="music.blocked.value && !toast" text="Коснись экрана, чтобы включить звук" :undo="false" />

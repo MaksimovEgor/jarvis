@@ -13,12 +13,22 @@
 
 Порт открывается после загрузки модели: до этого ядро получает отказ в
 соединении сразу, а не ждёт минуту.
+
+Память (asus — 5,8 ГБ на всё): штатный vosk_tts.Model занимал 1,5 ГБ сразу
+и дорастал до 2,1 ГБ. Модель собирается здесь сама — 0,54 ГБ при той же
+скорости синтеза:
+
+    словарь произношений  dict на миллионы строк  → sqlite на диске
+    BERT (просодия)       fp32, 654 МБ            → int8, 164 МБ (если есть файл)
+    арена onnxruntime     держит пиковые буферы   → выключена
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sqlite3
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,21 +48,76 @@ _synth: Any = None
 _lock = asyncio.Lock()
 
 
-def _load() -> Any:
-    import vosk_tts.model  # тяжёлый импорт
-    from vosk_tts import Synth
+class _Dictionary:
+    """Словарь произношений в sqlite рядом с исходным файлом: vosk_tts
+    обращается к нему только через `in` и `[]`. Строится один раз (~1 мин)."""
 
-    # Только CPU. vosk_tts сам берёт CUDA, если onnxruntime её видит (в .venv
-    # стоит onnxruntime-gpu ради Whisper), а на GTX 1050 синтез вдвое
-    # медленнее (0,68 от длительности звука против 0,3 на 8 ядрах) и занял бы
-    # 1,5 ГБ из 2 — видеокарта нужна Whisper в ядре.
-    runtime = vosk_tts.model.onnxruntime
-    available = runtime.get_available_providers
-    runtime.get_available_providers = lambda: ["CPUExecutionProvider"]
-    try:
-        return Synth(vosk_tts.model.Model(model_path=settings.vosk_tts_model_path))
-    finally:
-        runtime.get_available_providers = available
+    def __init__(self, source: Path) -> None:
+        db = source.with_suffix(".sqlite")
+        if not db.exists():
+            logger.info("Строю %s (один раз)", db)
+            tmp = db.with_suffix(".tmp")
+            tmp.unlink(missing_ok=True)
+            con = sqlite3.connect(tmp)
+            con.execute("CREATE TABLE d (w TEXT PRIMARY KEY, p TEXT, prob REAL) WITHOUT ROWID")
+            with open(source, encoding="utf-8") as f:
+                rows = ((i[0], i[2], float(i[1])) for i in (line.split(maxsplit=2) for line in f))
+                # Как в vosk_tts: из вариантов произношения слова — самый вероятный.
+                con.executemany(
+                    "INSERT INTO d VALUES (?, ?, ?) ON CONFLICT(w) DO UPDATE"
+                    " SET p = excluded.p, prob = excluded.prob WHERE excluded.prob > d.prob",
+                    rows,
+                )
+            con.commit()
+            con.close()
+            tmp.rename(db)
+        self._con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, check_same_thread=False)
+
+    def _get(self, word: str) -> str | None:
+        row = self._con.execute("SELECT p FROM d WHERE w = ?", (word,)).fetchone()
+        return row[0] if row else None
+
+    def __contains__(self, word: object) -> bool:
+        return isinstance(word, str) and self._get(word) is not None
+
+    def __getitem__(self, word: str) -> str:
+        phonemes = self._get(word)
+        if phonemes is None:
+            raise KeyError(word)
+        return phonemes
+
+
+class _Model:
+    """То же, что vosk_tts.Model (onnx, dic, config, tokenizer, bert_onnx), но
+    экономнее по памяти. Только CPU: на GTX 1050 синтез вдвое медленнее
+    (0,68 от длительности звука против 0,3 на 8 ядрах), а видеокарта нужна STT."""
+
+    def __init__(self, path: Path) -> None:
+        import onnxruntime
+        from tokenizers.implementations import BertWordPieceTokenizer
+
+        opts = onnxruntime.SessionOptions()
+        opts.enable_cpu_mem_arena = False
+
+        def session(file: Path) -> Any:
+            return onnxruntime.InferenceSession(str(file), sess_options=opts, providers=["CPUExecutionProvider"])
+
+        self.onnx = session(path / "model.onnx")
+        self.dic = _Dictionary(path / "dictionary")
+        self.config = json.loads((path / "config.json").read_text())
+        self.tokenizer = BertWordPieceTokenizer(vocab=str(path / "bert/vocab.txt"), unk_token="[UNK]", lowercase=False)
+        # int8-копия делается один раз вручную (README): рантайму нужен пакет onnx.
+        bert = path / "bert/model.int8.onnx"
+        if not bert.exists():
+            logger.warning("Нет %s — BERT в fp32 (+0,5 ГБ памяти)", bert)
+            bert = path / "bert/model.onnx"
+        self.bert_onnx = session(bert)
+
+
+def _load() -> Any:
+    from vosk_tts import Synth  # тяжёлый импорт
+
+    return Synth(_Model(Path(settings.vosk_tts_model_path)))
 
 
 @asynccontextmanager

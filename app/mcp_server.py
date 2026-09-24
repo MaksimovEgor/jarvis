@@ -125,6 +125,19 @@ async def rate_track(value: Literal["like", "dislike", "none"], which: Literal["
 
 
 @mcp.tool()
+async def show_lyrics() -> str:
+    """Показать на экране текст играющей песни (подсветка строк, как в Яндекс
+    Музыке): «покажи текст», «что он поёт», «какие там слова»."""
+    device = devices.current_device()
+    if device is None or not devices.is_web(device):
+        return NO_DEVICE
+    if devices.player_for(device).current is None:
+        return "Сейчас ничего не играет."
+    devices.web_output(device).show("lyrics")
+    return "Показываю текст."
+
+
+@mcp.tool()
 async def music_taste_note(text: str) -> str:
     """Запомнить музыкальное предпочтение для «Моей волны»: «я не люблю рэп»,
     «утром хочу русский рок», «больше джаза по вечерам». text — суть коротко, от

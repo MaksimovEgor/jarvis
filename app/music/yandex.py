@@ -186,17 +186,22 @@ def _cover_url(uri: str | None, size: str = "400x400") -> str | None:
     return f"https://{uri.replace('%%', size)}" if uri else None
 
 
-def to_track(t: Any, origin: Any = "query") -> Track | None:
-    """Трек библиотеки yandex-music → наш Track. Недоступный (нет прав) — None."""
+_LONG_KINDS: dict[str, Any] = {"audiobook": "audiobook", "podcast": "podcast", "podcast-episode": "podcast"}
+
+
+def to_track(t: Any, origin: Any = "query", kind: Any = None) -> Track | None:
+    """Трек библиотеки yandex-music → наш Track. Недоступный (нет прав) — None.
+    kind — книга/подкаст (главы, выпуски): длинное, с сохранением позиции."""
     if t is None or t.available is False or not t.id:
         return None
+    kind = kind or _LONG_KINDS.get(t.type or "", "music")
     title = t.title or "?"
     if t.version:
         title = f"{title} ({t.version})"
     artist = ", ".join(a.name for a in t.artists or [] if a.name) or None
     return Track(
         title=title, source="yandex", ref=ref_of(t.id), duration=(t.duration_ms or 0) / 1000 or None,
-        artist=artist, origin=origin, service="yandex", cover=_cover_url(t.cover_uri or t.og_image),
+        artist=artist, origin=origin, service="yandex", cover=_cover_url(t.cover_uri or t.og_image), kind=kind,
     )
 
 
@@ -206,6 +211,49 @@ async def search(query: str, limit: int = 3) -> list[Track]:
     result = await client().search(query, type_="track")
     found = result.tracks.results if result and result.tracks else []
     return [t for t in (to_track(x) for x in found[:limit * 2]) if t is not None][:limit]
+
+
+async def search_all(query: str, type_: str = "all") -> Any:
+    """Поиск Яндекса целиком: best, tracks, artists, albums, playlists, podcasts."""
+    return await client().search(query, type_=type_)
+
+
+async def artist_tracks(artist_id: str, limit: int = 30) -> list[Track]:
+    page = await client().artists_tracks(artist_id, page_size=limit)
+    return [t for t in (to_track(x) for x in (page.tracks if page else [])) if t is not None]
+
+
+async def album_tracks(album_id: str) -> tuple[Any, list[Track]]:
+    """(альбом, треки по порядку). У книги — главы, у подкаста — выпуски."""
+    album = await client().albums_with_tracks(album_id)
+    if album is None:
+        return None, []
+    kind = album.type if album.type in ("audiobook", "podcast") else None
+    flat = [x for volume in album.volumes or [] for x in volume]
+    return album, [t for t in (to_track(x, kind=kind) for x in flat) if t is not None]
+
+
+async def playlist_tracks(owner: str, kind: str) -> list[Track]:
+    playlist = await client().users_playlists(kind, owner)
+    if isinstance(playlist, list):
+        playlist = playlist[0] if playlist else None
+    if playlist is None:
+        return []
+    shorts = playlist.tracks or await playlist.fetch_tracks_async()
+    return [t for t in (to_track(getattr(x, "track", x)) for x in shorts) if t is not None]
+
+
+async def lyrics(ref: str) -> tuple[str | None, str | None]:
+    """(LRC с таймингом, обычный текст). Нет — (None, None)."""
+    c, tid = client(), track_id(ref)
+    out: list[str | None] = []
+    for fmt in ("LRC", "TEXT"):
+        try:
+            info = await c.tracks_lyrics(tid, format_=fmt)
+            out.append(await info.fetch_lyrics_async() if info else None)
+        except Exception:
+            out.append(None)
+    return out[0], out[1]
 
 
 async def tracks(refs: list[str]) -> list[Track]:

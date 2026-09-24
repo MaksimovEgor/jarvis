@@ -236,7 +236,7 @@ flowchart LR
   end
   subgraph ASUS["asus — сервер"]
     CORE["jarvis-core :8000<br/>app/main.py"]
-    STT["stt.py<br/>faster-whisper, GPU"]
+    STT["stt.py<br/>GigaAM v3, CPU int8"]
     TTSS["jarvis-tts :8001<br/>Vosk"]
     HERMES["Hermes Agent :8642<br/>LLM, память, скиллы"]
     SEARX["SearXNG :8080<br/>только builtin"]
@@ -267,7 +267,7 @@ flowchart LR
         <tbody>
           <tr><td>Браузер</td><td>Слышит «Джарвис», пишет команду, играет музыку и голос, показывает чат. Звук есть только здесь.</td><td class="m">web/src</td></tr>
           <tr><td>jarvis-core</td><td>Распознаёт речь, решает, кому отдать реплику, ведёт ходы и очереди плееров, таймеры, MCP-сервер для Hermes, отдаёт звук.</td><td class="m">app/main.py</td></tr>
-          <tr><td>jarvis-tts</td><td>Держит в памяти модель Vosk и синтезирует речь. Отдельный процесс: модель грузится около 60 с.</td><td class="m">app/tts_server.py</td></tr>
+          <tr><td>jarvis-tts</td><td>Держит в памяти модель Vosk и синтезирует речь. Отдельный процесс: модель грузится около 70 с. Занимает 0,55 ГБ вместо 2 ГБ: словарь произношений в sqlite, BERT в int8, без арены onnxruntime.</td><td class="m">app/tts_server.py</td></tr>
           <tr><td>Hermes</td><td>Думает над репликой: LLM, память о хозяине, скиллы. Музыку и таймеры включает через MCP-инструменты ядра.</td><td>внешний</td></tr>
           <tr><td>jarvis-tunnel</td><td>SSH к point: SOCKS наружу (YouTube, Edge), проброс ядра и дашборда Hermes внутрь.</td><td class="m">scripts/systemd</td></tr>
           <tr><td>jarvis-listener</td><td><span class="pill warn">выключен</span> Микрофон asus: openWakeWord → VAD → <code>/chat/audio</code>. Оставлен под будущую колонку.</td><td class="m">app/listener.py</td></tr>
@@ -373,7 +373,7 @@ flowchart TD
   SA --> CORE2[["POST /chat/audio detach"]]
       </pre></div>
       <div class="grid2">
-        <div class="note"><h3>Кто делает STT</h3><p>После «Джарвис, команда» текст уже есть от распознавателя браузера — ядро получает текст. После тапа или «Джарвис» с паузой — запись уходит файлом, и распознаёт <code>faster-whisper medium/int8</code> на GTX 1050 (~1,6 с). Не поднялся на GPU — <code>small</code> на CPU.</p></div>
+        <div class="note"><h3>Кто делает STT</h3><p>После «Джарвис, команда» текст уже есть от распознавателя браузера — ядро получает текст. После тапа или «Джарвис» с паузой — запись уходит файлом, и распознаёт <code>GigaAM v3</code> (e2e, с пунктуацией), int8 на CPU — 0,26 с на фразу, 0,33 ГБ RAM (на GPU было бы 0,06 с, но +0,65 ГБ RAM, а память на asus — узкое место). Запись длиннее 22 с режется по самой тихой паузе. Откат на прежний Whisper — <code>STT_ENGINE=whisper</code>.</p></div>
         <div class="note"><h3>Перебивание</h3><p>«Джарвис» слышен и пока Джарвис думает, и пока говорит: голос замолкает, недосказанное выбрасывается (<code>speechGeneration</code>). Прошлый ход при этом не отменяется — решает диспетчер конфликтов.</p></div>
       </div>
     </section>
@@ -607,6 +607,8 @@ flowchart TD
         <div class="note"><h3>Вход в Яндекс</h3><p>Код устройства (ya.ru/device) из карточки в «Моей музыке». Токен — <code>data/yandex_token.json</code> (600). Сломался — <code>broken</code>, всё играет с YouTube. Лайки Яндекса импортируются при входе и раз в сутки; оценки из Джарвиса ставятся и в Яндексе.</p></div>
         <div class="note"><h3>Волна с настройками</h3><p>Станции: <code>user:onyourwave</code>, занятия <code>activity:*</code> (12), эпохи <code>epoch:*</code>, жанры <code>genre:*</code> (161), настроения <code>mood:*</code>. Настройки: настроение (бодрое/весёлое/спокойное/грустное), характер (любимое/незнакомое/популярное), язык (русский/иностранный/без слов). С настройками волну ведёт только Яндекс; «просто волна» — Яндекс 50 % + лайки 25 % + YT Music 15 % + dj 10 %. Старый API rotor/station/*/settings3 отвечает 415 — используется сессионный.</p></div>
         <div class="note"><h3>Качество и место</h3><p>Кэш — MP3 320 (~9 МБ), лайки — FLAC 24 бит / 44,1 кГц (~45 МБ). Не вышел FLAC — MP3 320. Качество в плеере — по самому файлу (<code>ffprobe</code>). Ref: <code>ym-&lt;id&gt;</code>, <code>sc-&lt;id&gt;</code>, YouTube — id видео (11 символов; <code>ym-12345678</code> тоже 11 — проверять префикс первым).</p></div>
+        <div class="note"><h3>Тексты</h3><p><code>lyrics.py</code>: Яндекс <code>tracks_lyrics</code> (LRC построчно) → LRCLIB (<code>lrclib.net/api/get</code>, затем <code>search</code>), кэш <code>data/music/lyrics/&lt;ref&gt;.json</code> («нет текста» — на сутки). Подсветка строки — на клиенте по позиции &lt;audio&gt;, тап — перемотка. Голосом «покажи текст» → SSE <code>{type:"ui", open:"lyrics"}</code>.</p></div>
+        <div class="note"><h3>Поиск и очередь</h3><p><code>catalog.py</code>, вкладки: Яндекс (лучший, треки, исполнители, альбомы, плейлисты), YouTube (YT Music + видео), SoundCloud, Книги / Подкасты (Яндекс <code>search type=podcast</code>, делим по <code>album.type</code>; запасной — YouTube), Детям (детские станции + жанр <code>childrensliterature</code>…). Кэш 10 мин (Яндекс отвечал 429). Книга — с недослушанной главы (<code>positions.resume_index</code>), подкаст — с последнего выпуска. Очередь: <code>/player/queue</code>, перестановка, удаление, «играть следующим».</p></div>
         <div class="note"><h3>Вход в веб</h3><p><code>app/web_auth.py</code>: страница <code>/login</code>, cookie <code>jarvis_auth</code> на год с продлением, bcrypt-хэш в <code>WEB_AUTH_HASH</code>. Basic auth в Caddy убран — PWA на iPhone его окно не показывала (чёрный экран).</p></div>
       </div>
     </section>
@@ -693,7 +695,7 @@ sequenceDiagram
           <tr><td>Запись</td><td>6 с молчания</td><td>Нисходящий сигнал, запрос не отправляется</td></tr>
           <tr><td>Сеть</td><td>POST не прошёл</td><td>«Сервер ответил …» в чате</td></tr>
           <tr><td>STT</td><td>Пустой результат (шум)</td><td>«Не расслышал.» — в Hermes не идёт (пустой ввод даёт 500)</td></tr>
-          <tr><td>STT</td><td>GPU не поднялся</td><td><span class="pill ok">фоллбек</span> small на CPU</td></tr>
+          <tr><td>STT</td><td>GPU не поднялся (если STT_DEVICE=cuda)</td><td><span class="pill ok">фоллбек</span> GigaAM int8 на CPU</td></tr>
           <tr><td>Быстрый путь</td><td>Исключение / не нашёл</td><td><span class="pill ok">фоллбек</span> Hermes</td></tr>
           <tr><td>Hermes</td><td>Рестарт (503 draining, 502, нет соединения)</td><td>Повторы 2 / 4 / 8 с</td></tr>
           <tr><td>Hermes</td><td>Обрыв потока, пустой ответ, 4xx</td><td><span class="pill bad">ошибка</span> «Не получилось: …», пуш если свёрнуто</td></tr>
@@ -728,6 +730,8 @@ sequenceDiagram
           <tr><td class="m">GET /library/likes, hidden, storage, stats</td><td>браузер, человек</td><td>«Моя музыка», место, метрика волны</td></tr>
           <tr><td class="m">GET /media/file/{ref}</td><td>&lt;audio&gt;</td><td>Песня с диска любого источника (Range)</td></tr>
           <tr><td class="m">/library/yandex/connect, status, disconnect, stations</td><td>браузер</td><td>Вход в Яндекс кодом устройства, каталог станций</td></tr>
+          <tr><td class="m">GET /library/lyrics, /library/search</td><td>браузер</td><td>Текст трека; поиск по вкладке</td></tr>
+          <tr><td class="m">GET /player/queue, POST /player/queue/{move,remove,play}</td><td>браузер</td><td>Экран «Очередь»</td></tr>
           <tr><td class="m">GET /login, POST /login</td><td>браузер</td><td>Вход снаружи, cookie на год</td></tr>
           <tr><td class="m">GET /media/cover/{id}</td><td>&lt;img&gt;</td><td>Обложка трека, кэш на диске</td></tr>
           <tr><td class="m">GET /media/yt, /media/hls, /media/ref</td><td>&lt;audio&gt;, mpv</td><td>Звук через ядро</td></tr>
@@ -792,7 +796,7 @@ flowchart LR
         <div class="note hot"><h3>«Чей ход» — одна глобальная переменная</h3><p><code>devices._turn</code> один на всё ядро, а ходы идут параллельно. Две реплики с телефона и Mac одновременно — MCP-инструменты первой могут сыграть на втором устройстве. Пока пользователь один, риск низкий.</p></div>
         <div class="note"><h3>Сбой TTS роняет ход целиком</h3><p><code>speech.speak</code> внутри хода: если Vosk недоступен и файла голоса Piper нет, ответ Hermes не попадает ни на экран, ни в историю. Можно ловить ошибку озвучки и отдавать текст без голоса.</p></div>
         <div class="note"><h3>vite dev-прокси</h3><p><code>vite.config.ts</code> проксирует только <code>/chat</code> — в <code>npm run dev</code> не работают <code>/player</code>, <code>/tts</code>, <code>/push</code>, <code>/media</code>. Конфиг не трогал.</p></div>
-        <div class="note"><h3>Дефолты config.py ≠ прод</h3><p>В коде <code>builtin / piper / small cpu</code>, в <code>.env.example</code> — <code>hermes / vosk / medium cuda</code>. Как фоллбек нормально, но комментарий «small/int8, 2 ГБ узковаты» уже не про то, что работает.</p></div>
+        <div class="note"><h3>Дефолты config.py ≠ прод</h3><p>В коде <code>builtin / piper / gigaam cpu</code>, в <code>.env.example</code> — <code>hermes / vosk / gigaam cpu</code>. Как фоллбек нормально.</p></div>
         <div class="note"><h3>Мелочи</h3><p>Пустой чат пишет «Разговор общий с Джарвисом дома» — про listener. <code>/player/control seek</code> клиент не использует. Цикл <code>_edge_with_retry</code> через <code>range(1, 2)</code> делает 2 попытки, но читается тяжело.</p></div>
       </div>
     </section>

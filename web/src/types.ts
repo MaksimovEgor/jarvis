@@ -110,6 +110,7 @@ export type PlayerEvent =
   | { type: 'seek'; seq: number; position: number }
   | { type: 'announce'; url: string }
   | { type: 'volume'; level: number }
+  | { type: 'ui'; open: 'lyrics' | 'queue' }
   | TurnEvent
   | TurnsEvent
 
@@ -147,3 +148,37 @@ export interface YandexStatus {
   url: string | null
   expiresAt: number | null
 }
+
+export interface LyricsData {
+  synced: { t: number; line: string }[] | null
+  plain: string | null
+  source: 'yandex' | 'lrclib' | null
+}
+
+export type SearchTab = 'yandex' | 'youtube' | 'soundcloud' | 'books' | 'podcasts' | 'kids'
+export type EntityType = 'track' | 'artist' | 'album' | 'playlist' | 'audiobook' | 'podcast' | 'station'
+
+export interface Entity {
+  source: 'yandex' | 'youtube' | 'soundcloud'
+  type: EntityType
+  id: string
+  title: string
+  subtitle: string
+  cover: string | null
+  coverCrop: boolean
+  rating: Rating
+}
+
+export interface SearchSection {
+  kind: 'best' | 'tracks' | 'artists' | 'albums' | 'playlists' | 'books' | 'podcasts' | 'stations' | 'videos'
+  title: string
+  items: Entity[]
+}
+
+export interface QueueData {
+  pos: number
+  tracks: (UpcomingTrack & { service?: string | null })[]
+}
+
+// «Сейчас играет»: обложка, текст песни или очередь.
+export type Panel = 'cover' | 'lyrics' | 'queue'

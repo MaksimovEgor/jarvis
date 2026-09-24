@@ -19,7 +19,7 @@
 телефон / Mac (web/, PWA)                         asus (сервер, звука нет)
   «Джарвис» — Web Speech API ─┐
   запись — MediaRecorder ─────┼─ POST /chat/* (detach) ─► jarvis-core (app/main.py)
-  плеер <audio> ◄─ SSE /player/events ◄─┐                 ├ stt.py  faster-whisper (GPU)
+  плеер <audio> ◄─ SSE /player/events ◄─┐                 ├ stt.py  GigaAM v3 (CPU)     
   голос ◄─ GET /tts/chunk/<id>/<n> ◄────┤                 ├ router.py  быстрые команды
                                         │                 ├ Hermes (/v1/responses) ─MCP /mcp─┐
                                         │                 │   или builtin: orchestrator.py    │
@@ -51,6 +51,13 @@
      curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json'
    ```
    и поправить `TTS_VOICE_PATH` в `.env` под точное имя файла.
+   Модель распознавания GigaAM v3 (~1,1 ГБ) — в `data/models/gigaam-v3/`,
+   именно в папку, не в кэш HF (onnxruntime 1.24.1 не открывает модели по
+   симлинкам кэша):
+   ```
+   ssh asus 'cd jarvis && .venv/bin/python -c "from huggingface_hub import snapshot_download as d; \
+     d(\"istupakov/gigaam-v3-onnx\", local_dir=\"data/models/gigaam-v3\", allow_patterns=[\"config.json\", \"v3_e2e_rnnt*\"])"'
+   ```
 4. Вписать ключ LLM в `~/jarvis/.env` на сервере (`LLM_API_KEY=...`,
    `LLM_BASE_URL`/`LLM_MODEL` под выбранного провайдера — по умолчанию
    DeepSeek).
@@ -192,6 +199,15 @@ iPhone/Mac ─https─► Caddy на point ─► 127.0.0.1:<порт> ─ssh -R
   процесс `jarvis-tts` (грузится ~60–70 с с холодного диска, пока — Piper),
   синтез ~0,3 от длительности звука. Журнал: `journalctl --user -u jarvis-tts`.
   Качать модель только через прокси: напрямую alphacephei.com отдаёт ~1 КБ/с.
+  Память — 0,54 ГБ вместо 1,5–2,1 ГБ (см. `app/tts_server.py`): словарь
+  сам переезжает в sqlite при первом старте, а int8-копию BERT сделать один
+  раз вручную (пакет onnx — во временном venv, в проект не нужен):
+  ```
+  ssh asus 'python3 -m venv /tmp/qenv && /tmp/qenv/bin/pip install -q onnx onnxruntime && \
+    cd jarvis/data/models/vosk-tts/vosk-model-tts-ru-0.9-multi/bert && \
+    /tmp/qenv/bin/python -c "from onnxruntime.quantization import quantize_dynamic as q, QuantType as T; \
+      q(\"model.onnx\", \"model.int8.onnx\", weight_type=T.QInt8)" && rm -rf /tmp/qenv'
+  ```
 - Edge (Microsoft) оставлен как вариант, но через туннель нестабилен
   (NoAudioReceived, таймауты). Запасной всегда — Piper.
 - Перед синтезом текст чистится от эмодзи и markdown, длинный режется по фразам.

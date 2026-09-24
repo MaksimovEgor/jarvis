@@ -29,11 +29,14 @@ class Settings(BaseSettings):
     # Отсюда берутся токен бота и чат для «пришли мне в Telegram».
     hermes_env_file: str = "~/.hermes/.env"
 
-    # STT — faster-whisper локально на asus (2GB VRAM у GTX 1050 узковаты
-    # для large, поэтому small/int8; CPU-фоллбек тоже тянет small в реальном
-    # времени на 8 ядрах).
-    stt_model_size: str = "small"
+    # STT локально на asus (app/services/stt.py). gigaam — основной (точнее
+    # на русском), whisper — откат на faster-whisper.
+    stt_engine: Literal["gigaam", "whisper"] = "gigaam"
     stt_device: str = "cpu"
+    gigaam_model: str = "gigaam-v3-e2e-rnnt"
+    gigaam_model_path: str = "data/models/gigaam-v3"
+    # Только для whisper (2GB VRAM у GTX 1050 узковаты для large).
+    stt_model_size: str = "small"
     stt_compute_type: str = "int8"
     stt_language: str = "ru"
 

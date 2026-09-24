@@ -66,3 +66,16 @@ async def test_wave_spec_passed_to_player(calls: dict[str, AsyncMock]) -> None:
     await router.try_fast("поставь что-нибудь грустное на русском", DEVICE)
     spec = calls["play_wave"].await_args.kwargs["spec"]
     assert (spec.mood_energy, spec.language) == ("sad", "russian")
+
+
+@pytest.mark.parametrize("text", ["покажи текст", "покажи слова песни", "что он поет", "какие там слова"])
+async def test_show_lyrics_phrases(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    from app.music import devices
+    from tests.conftest import yt
+
+    shown = []
+    player = devices.player_for(DEVICE)
+    monkeypatch.setattr(Player, "current", property(lambda self: yt("a")))
+    monkeypatch.setattr(type(player.output), "show", lambda self, what: shown.append(what))
+    reply = await router.try_fast(text, DEVICE)
+    assert reply is not None and reply.tool == "show_lyrics" and shown == ["lyrics"]
