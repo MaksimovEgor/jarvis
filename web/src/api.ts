@@ -1,4 +1,4 @@
-import type { HistoryEntry } from './types'
+import type { HiddenArtist, HistoryEntry, LibraryStorage, LibraryTrack, Mood, Rating } from './types'
 
 // Озвучка ответа: куски забираются по одному (app/services/speech.py).
 export interface SpeechMore {
@@ -90,6 +90,10 @@ export interface PlayerReport {
   hls?: boolean
   // Вкладка на экране: свёрнутой ядро шлёт готовое пушем.
   visible?: boolean
+  // Должно играть, а <audio> ждёт данные дольше 10 с — ядро переключит трек.
+  stalled?: boolean
+  // Музыка придержана экраном (слушаем «Джарвис», объявление) — сторожу не зависание.
+  held?: boolean
 }
 
 // Диагностика с телефона в журнал ядра: в Safari на iPhone нет консоли под рукой.
@@ -106,6 +110,50 @@ export function playerEventsUrl(since: string): string {
 
 export async function playerControl(action: PlayerAction, position?: number): Promise<void> {
   await postJson('player/control', { device: DEVICE_ID, action, position })
+}
+
+export type RateValue = 'like' | 'dislike' | 'none'
+
+export async function rateTrack(value: RateValue, ref?: string): Promise<{ text: string; rating: Rating }> {
+  const resp = await fetch('library/rate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device: DEVICE_ID, value, ref }),
+  })
+  if (!resp.ok) {
+    throw new Error(`Сервер ответил ${resp.status}`)
+  }
+  return resp.json()
+}
+
+export async function unmuteArtist(artist: string): Promise<void> {
+  await postJson('library/unmute', { artist })
+}
+
+export async function libraryPlay(mode: 'wave' | 'liked' | 'track', opts: { mood?: Mood; ref?: string } = {}): Promise<void> {
+  await postJson('library/play', { device: DEVICE_ID, mode, ...opts })
+}
+
+export async function fetchLikes(offset: number, q = ''): Promise<{ total: number; tracks: LibraryTrack[] }> {
+  const query = new URLSearchParams({ offset: String(offset), limit: '50' })
+  if (q) query.set('q', q)
+  return getJson(`library/likes?${query}`)
+}
+
+export async function fetchHidden(): Promise<{ tracks: LibraryTrack[]; artists: HiddenArtist[] }> {
+  return getJson('library/hidden')
+}
+
+export async function fetchStorage(): Promise<LibraryStorage> {
+  return getJson('library/storage')
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const resp = await fetch(url)
+  if (!resp.ok) {
+    throw new Error(`Сервер ответил ${resp.status}`)
+  }
+  return resp.json() as Promise<T>
 }
 
 // Отчёты не должны ронять интерфейс — сеть на телефоне моргает.

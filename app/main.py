@@ -21,7 +21,7 @@ from app.agent import conflicts, router
 from app.agent.orchestrator import run_agent
 from app.config import settings
 from app.mcp_server import mcp
-from app.music import devices, media, web_player
+from app.music import devices, library_api, media, taste, web_player
 from app.schemas import (
     AudioChatResponse, AudioMore, CancelRequest, ClientLog, PushSubscribeRequest, PushUnsubscribeRequest,
     TextChatRequest, TextChatResponse,
@@ -44,17 +44,21 @@ _mcp_app = mcp.streamable_http_app()
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     timers.start()
+    # Раз в сутки профиль dj разбирает прослушанное и размечает лайки.
+    digest = asyncio.create_task(taste.run_digest_daily())
     asyncio.create_task(tts.warmup())
     # Whisper medium на GPU грузится ~10 с — не на первой голосовой команде.
     asyncio.create_task(stt.warmup())
     async with _mcp_app.router.lifespan_context(_mcp_app):
         yield
+    digest.cancel()
 
 
 app = FastAPI(title="Jarvis", lifespan=_lifespan)
 app.router.routes.extend(_mcp_app.routes)
 app.include_router(media.router)
 app.include_router(web_player.router)
+app.include_router(library_api.router)
 
 _LOCAL_ONLY = ("/mcp", "/music", "/admin")
 

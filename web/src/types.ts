@@ -32,6 +32,36 @@ export interface PlayerState {
   start: number
   paused: boolean
   live?: boolean
+  // id трека YouTube — только его можно лайкнуть; у радио и файлов null.
+  ref?: string | null
+  rating?: Rating
+  // «волна · вечер», «мои лайки» — откуда трек в очереди.
+  origin?: string | null
+  from?: FromWhere | null
+}
+
+export type Rating = 1 | -1 | null
+export type FromWhere = 'liked' | 'cache' | 'net' | 'stream'
+export type Mood = 'auto' | 'energetic' | 'calm' | 'focus' | 'sleep' | 'discover'
+
+export interface LibraryTrack {
+  ref: string
+  title: string
+  artist: string | null
+  duration: number | null
+  addedAt: number
+  rating: Rating
+}
+
+export interface LibraryStorage {
+  likedMb: number
+  cacheMb: number
+  limitMb: number
+}
+
+export interface HiddenArtist {
+  artist: string
+  dislikes: number
 }
 
 export type PlayerEvent =

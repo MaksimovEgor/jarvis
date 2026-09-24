@@ -199,6 +199,7 @@
     <a href="#hermes">Hermes и MCP</a>
     <a href="#parallel">Параллельно и отмена</a>
     <a href="#player">Плеер</a>
+    <a href="#wave">Моя волна и вкус</a>
     <a href="#voice">Озвучка</a>
     <a href="#timers">Таймеры и объявления</a>
     <a href="#delivery">Доставка и обрывы</a>
@@ -437,7 +438,12 @@ flowchart LR
           <tr><td>«что играет», «что за песня»</td><td class="m">now_playing</td><td>—</td></tr>
           <tr><td>«таймер на пять минут», «полчаса»</td><td class="m">timers.add</td><td>длительность не разобралась</td></tr>
           <tr><td>«включи радио [джаз | Европа Плюс]»</td><td class="m">play_radio</td><td>станция не найдена</td></tr>
-          <tr><td>«включи / поставь / сыграй X»</td><td class="m">play_youtube(kind)</td><td>X — «музыку», «что-нибудь», свет, таймер…; «последний / новый выпуск»; ничего не нашлось</td></tr>
+          <tr><td>«лайк», «мне нравится», «сохрани песню»</td><td class="m">player.rate(+1)</td><td>—</td></tr>
+          <tr><td>«дизлайк», «не нравится», «не включай больше»</td><td class="m">player.rate(−1) → следующий</td><td>—</td></tr>
+          <tr><td>«включи музыку / мою волну / что-нибудь»</td><td class="m">play_wave(auto)</td><td>—</td></tr>
+          <tr><td>«что-нибудь бодрое», «музыку для работы / для сна», «что-нибудь новенькое»</td><td class="m">play_wave(mood)</td><td>настроение не распозналось → обычный поиск</td></tr>
+          <tr><td>«включи мою музыку / лайки / любимое»</td><td class="m">play_liked</td><td>—</td></tr>
+          <tr><td>«включи / поставь / сыграй X»</td><td class="m">play_youtube(kind)</td><td>X — свет, таймер…; «последний / новый выпуск»; ничего не нашлось</td></tr>
           <tr><td>несколько просьб: «…, а потом…», «и сделай…»</td><td>—</td><td>всегда</td></tr>
           <tr><td>исключение внутри быстрого пути</td><td>—</td><td>всегда (в лог)</td></tr>
         </tbody>
@@ -544,7 +550,37 @@ flowchart TD
         <div class="note"><h3>Длинное: книги, подкасты, треки &gt; 20 мин</h3><p>Позиция сохраняется на паузе, стопе, переключении и раз в 15 с в <code>data/positions.json</code>, общая для всех устройств. Старт — с места остановки минус 10 с. Ближе 30 с к концу — дослушано.</p></div>
         <div class="note"><h3>iPhone</h3><p>Первый <code>play()</code> возможен только в жесте — любой тап «разблокирует» оба &lt;audio&gt; тишиной. Громкость меняется только кнопками. Длинное с YouTube — только HLS. В фоне Safari рвёт SSE.</p></div>
         <div class="note"><h3>Ссылки googlevideo</h3><p>Привязаны к IP — поэтому и получение ссылки, и чтение идут через один SOCKS (<code>rdns=True</code>, <code>encoded=True</code>). 403 → ссылка берётся заново, второй раз 403 → 502.</p></div>
-        <div class="note"><h3>Кнопки на экране и экране блокировки</h3><p><code>POST /player/control</code>: pause, resume, next, previous, stop. Перемотку браузер делает сам и сообщает позицию отчётом.</p></div>
+        <div class="note"><h3>Кнопки на экране и экране блокировки</h3><p><code>POST /player/control</code>: pause, resume, next, previous, stop. Перемотку браузер делает сам и сообщает позицию отчётом. ♡ / 👎 — <code>POST /library/rate</code>.</p></div>
+        <div class="note"><h3>Сторож зависаний</h3><p>Браузер: <code>&lt;audio&gt;</code> ждёт данные &gt; 10 с, хотя должен играть → <code>report {stalled}</code>. Ядро: экран открыт, не пауза, нет хода, а позиция не растёт 25 с → то же. Оба пути — <code>_on_end("stall")</code>: следующий трек и «stalled» в журнале.</p></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="wave">
+      <h2>«Моя волна», лайки и вкус</h2>
+      <p class="sub">Какой трек следующий, решает ядро за миллисекунды (<code>wave.py</code>). Профиль Hermes «dj» — отдельный процесс со своей памятью — в фоне подкладывает зёрна поиска и размечает энергию. Волна его никогда не ждёт.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  V["«включи музыку» / play_wave(mood)"] --> F{"Wave.first:<br/>лайк на диске под слот"}
+  F -- "есть" --> P["играет сразу (< 1 с)"]
+  F -- "нет" --> M0["Wave.more(tag=False):<br/>строгое настроение → зёрна dj / запасной запрос"]
+  M0 --> P
+  V -. "фоном" .-> SEEDS["taste.refresh_seeds_soon(slot, mood)<br/>dj → 4 similar + 5 discover → library.seeds"]
+  P --> R["_refill, когда впереди < 3"]
+  R --> POOL["пул: лайки · радио YT Music от лайков и зёрен ·<br/>поиск YT Music по discover-зёрнам"]
+  POOL --> EN["taste.energies_for: dj размечает энергию 1–5<br/>(пачки по 20 параллельно, ≤ 45 с)"]
+  EN --> C["compose(): доли 30/50/20, бан, недавнее 3 ч,<br/>энергия под слот и настроение, штрафы,<br/>исполнитель не чаще раза в 4"]
+  C --> Q["+8 в очередь, следующий качается заранее"]
+  POOL -- "сеть молчит" --> OFF["лайки + дослушанное в кэше"]
+  OFF --> C
+      </pre></div>
+      <div class="grid2">
+        <div class="note"><h3>Сигналы вкуса</h3><p>Лайк — файл в <code>data/music/liked</code> навсегда + сильный плюс; дослушал — плюс; «дальше» раньше 30 с и половины — пропуск (минус исполнителю); дизлайк — трек не звучит нигде (и в миксах), 2 дизлайка исполнителю — вес ×0.25 и вон из миксов.</p></div>
+        <div class="note"><h3>Время суток</h3><p>Утро 6–11 (энергия 3–5), день 11–17 (2–5), вечер 17–23 (2–4), ночь 23–6 (1–3). Настроение переопределяет: бодрое 4–5, спокойное 1–3, работа 2–3, сон 1–2. Неразмеченный трек проходит с весом ×0.5.</p></div>
+        <div class="note"><h3>Профиль dj</h3><p><code>~/.hermes/profiles/dj</code>, <code>hermes-dj.service</code>, API 127.0.0.1:8643, инструменты — память, веб, история. Ключ DeepSeek и прокси скопированы из основного, токена Telegram нет. Недоступен → тот же промпт в <code>LLM_*</code> → без зёрен и разметки.</p></div>
+        <div class="note"><h3>dj учится</h3><p>Раз в сутки в 04:00 — сводка прослушиваний; dj сам пишет устойчивые выводы в свою <code>MEMORY.md</code>. «Я не люблю рэп» основному Hermes → <code>music_taste_note</code> → заметка в библиотеке → в каждом запросе к dj.</p></div>
+        <div class="note"><h3>Хранилище 10 ГБ</h3><p><code>liked/</code> не вытесняется; <code>cache/</code> — LRU в пределах «лимит минус лайки». Лайк: cache→liked, снятие: обратно, дизлайк: удалить из кэша. Лайки у 90 % лимита — предупреждение в журнал.</p></div>
+        <div class="note"><h3>Метрика</h3><p><code>GET /library/stats?days=7</code>: доля дослушанных в волне (цель ≥ 70 %), пропуски, дизлайки, зависания (цель 0), доля из кэша, медиана старта.</p></div>
       </div>
     </section>
 
@@ -661,6 +697,8 @@ sequenceDiagram
           <tr><td class="m">GET /tts/chunk/{id}/{n}</td><td>браузер, listener</td><td>Кусок озвучки</td></tr>
           <tr><td class="m">GET /player/events</td><td>браузер</td><td>SSE: state, seek, volume, announce, turn, turns</td></tr>
           <tr><td class="m">POST /player/report, /player/control</td><td>браузер</td><td>Отчёт плеера, кнопки</td></tr>
+          <tr><td class="m">POST /library/rate, /library/play, /library/unmute</td><td>браузер</td><td>Лайк/дизлайк, запуск волны/лайков/трека, «Вернуть» исполнителя</td></tr>
+          <tr><td class="m">GET /library/likes, hidden, storage, stats</td><td>браузер, человек</td><td>«Моя музыка», место, метрика волны</td></tr>
           <tr><td class="m">GET /media/yt, /media/hls, /media/ref</td><td>&lt;audio&gt;, mpv</td><td>Звук через ядро</td></tr>
           <tr><td class="m">/push/key, /push/subscribe, /push/unsubscribe</td><td>браузер</td><td>Web Push</td></tr>
           <tr><td class="m">POST /client/log</td><td>браузер</td><td>Диагностика wake word в журнал</td></tr>
@@ -677,7 +715,10 @@ sequenceDiagram
           <tr><td class="m">data/timers.json</td><td>Таймеры и напоминания</td></tr>
           <tr><td class="m">data/positions.json</td><td>Где остановились в длинном, до 200 записей</td></tr>
           <tr><td class="m">data/push.json, data/vapid.pem</td><td>Подписки на пуши и ключ VAPID (пересоздашь — подписки заново)</td></tr>
-          <tr><td class="m">data/music/cache</td><td>Скачанные треки, LRU 2 ГБ</td></tr>
+          <tr><td class="m">data/music/liked</td><td>Лайкнутые треки, навсегда</td></tr>
+          <tr><td class="m">data/music/cache</td><td>Прочие скачанные треки, LRU в пределах 10 ГБ минус лайки</td></tr>
+          <tr><td class="m">data/music/library.db</td><td>SQLite: треки (исполнитель, энергия, теги), оценки, журнал прослушиваний, заметки, зёрна dj</td></tr>
+          <tr><td class="m">~/.hermes/profiles/dj</td><td>Профиль Hermes «dj»: SOUL, память о вкусе, ключ API</td></tr>
           <tr><td class="m">в памяти ядра</td><td>Ходы, плееры, «чей ход», разговоры Hermes, куски озвучки, журнал событий SSE — пропадают при рестарте</td></tr>
         </tbody>
       </table></div>

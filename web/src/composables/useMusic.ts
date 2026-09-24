@@ -1,11 +1,14 @@
 import { computed, ref } from 'vue'
 
-import { playerControl, playerEventsUrl, playerReport, type PlayerReport } from '../api'
-import type { PlayerEvent, PlayerState, TurnEvent, TurnsEvent } from '../types'
+import { clientLog, playerControl, playerEventsUrl, playerReport, rateTrack, type PlayerReport } from '../api'
+import type { FromWhere, PlayerEvent, PlayerState, Rating, TurnEvent, TurnsEvent } from '../types'
 import { SILENCE } from './usePlayer'
 
 const REPORT_EVERY_MS = 10_000
 const RECONNECT_MS = 3_000
+// Столько <audio> может ждать данные, пока должно играть, — дальше просим
+// ядро переключить трек (оно же запишет «завис» в журнал для метрики).
+const STALL_MS = 10_000
 
 // Громкость <audio> на iPhone не меняется (только кнопками) — сообщаем ядру,
 // чтобы «тише» отвечало честно.
@@ -32,6 +35,10 @@ export function useMusic(
   const isLoading = ref(false)
   const position = ref(0)
   const duration = ref(0)
+  const trackRef = ref<string | null>(null)
+  const rating = ref<Rating>(null)
+  const origin = ref<string | null>(null)
+  const from = ref<FromWhere | null>(null)
 
   const audio = new Audio()
   audio.preload = 'auto'
@@ -50,6 +57,7 @@ export function useMusic(
   // id последнего события — при переподключении ядро дошлёт пропущенное.
   let lastEventId = ''
   let reconnectTimer: number | null = null
+  let stallTimer: number | null = null
 
   const hasTrack = computed(() => title.value !== null)
 
@@ -65,6 +73,7 @@ export function useMusic(
   // Пауза, которую делаем мы сами (удержание, смена трека), — не путать с
   // паузой с экрана блокировки или отключением Bluetooth-колонки.
   function pauseSelf(): void {
+    clearStall()
     if (audio.paused) return
     selfPause = true
     audio.pause()
@@ -96,6 +105,10 @@ export function useMusic(
         audio.load()
       }
     }
+    trackRef.value = state.ref ?? null
+    rating.value = state.rating ?? null
+    origin.value = state.origin ?? null
+    from.value = state.from ?? null
     wantPlaying.value = !state.paused && state.src !== null
     updateSession()
     apply()
@@ -157,11 +170,38 @@ export function useMusic(
       pendingStart = 0
     }
   })
+  function clearStall(): void {
+    if (stallTimer !== null) {
+      clearTimeout(stallTimer)
+      stallTimer = null
+    }
+  }
+
+  // Сеть моргнула и буфер кончился — не молчим бесконечно, как «зависшая колонка».
+  function watchStall(): void {
+    clearStall()
+    const stalledSeq = seq
+    stallTimer = window.setTimeout(() => {
+      stallTimer = null
+      if (stalledSeq === seq && hasTrack.value && !live.value && wantPlaying.value && held === 0) {
+        clientLog(`завис: ${title.value}`)
+        report({ stalled: true })
+      }
+    }, STALL_MS)
+  }
+
   audio.addEventListener('playing', () => {
     isPlaying.value = true
     isLoading.value = false
+    clearStall()
   })
-  audio.addEventListener('waiting', () => (isLoading.value = true))
+  audio.addEventListener('waiting', () => {
+    isLoading.value = true
+    if (wantPlaying.value && held === 0) watchStall()
+  })
+  audio.addEventListener('stalled', () => {
+    if (wantPlaying.value && held === 0 && !isPlaying.value) watchStall()
+  })
   audio.addEventListener('pause', () => {
     isPlaying.value = false
     if (selfPause) {
@@ -258,11 +298,14 @@ export function useMusic(
   // объявление таймера может прийти посреди разговора.
   function hold(): void {
     held += 1
+    if (held === 1 && hasTrack.value) void playerReport({ seq, held: true })
     pauseSelf()
   }
 
   function release(): void {
+    const was = held
     held = Math.max(0, held - 1)
+    if (was > 0 && held === 0 && hasTrack.value) void playerReport({ seq, held: false })
     apply()
   }
 
@@ -295,6 +338,27 @@ export function useMusic(
 
   function stop(): void {
     void playerControl('stop').catch(() => undefined)
+  }
+
+  // Оценка сразу на экране, ядро подтвердит снимком состояния. Дизлайк
+  // переключает трек на ядре — новый трек придёт тем же снимком.
+  function like(): void {
+    if (!trackRef.value) return
+    const liked = rating.value === 1
+    rating.value = liked ? null : 1
+    void rateTrack(liked ? 'none' : 'like', trackRef.value).catch(() => (rating.value = liked ? 1 : null))
+  }
+
+  function dislike(): void {
+    if (!trackRef.value) return
+    rating.value = -1
+    void rateTrack('dislike', trackRef.value).catch(() => (rating.value = null))
+  }
+
+  // «Отменить» после дизлайка: трек уже переключён, просто снимаем оценку.
+  function unrate(ref: string): void {
+    void rateTrack('none', ref).catch(() => undefined)
+    if (trackRef.value === ref) rating.value = null
   }
 
   function seek(to: number): void {
@@ -330,6 +394,13 @@ export function useMusic(
     position,
     duration,
     hasTrack,
+    trackRef,
+    rating,
+    origin,
+    from,
+    like,
+    dislike,
+    unrate,
     unlock,
     hold,
     release,

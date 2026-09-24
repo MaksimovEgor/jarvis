@@ -19,7 +19,8 @@ from typing import Literal
 from mcp.server.mcpserver import MCPServer
 
 from app.music import devices
-from app.music.models import Kind
+from app.music.library import library
+from app.music.models import Kind, Mood, Rating
 from app.music.player import Player
 from app.services import speaker, telegram
 from app.timers import timers
@@ -32,6 +33,7 @@ mcp = MCPServer(
         "Плеер и таймеры Джарвиса. Звучит на том устройстве, с которого пришла реплика "
         "(телефон, Mac); из Telegram — на последнем, где был Джарвис. Музыка, книги, подкасты, радио — "
         "play_music, resume_listening, play_radio, music_control, seek, set_volume, now_playing. "
+        "«Моя волна» и вкус: play_wave, play_liked, rate_track, music_taste_note. "
         "Таймеры и напоминания голосом — set_timer, remind, list_timers, cancel_timer. "
         "Сказать вслух — announce. Никогда не говори, что действие выполнено, не вызвав "
         "инструмент. Результат перескажи коротко."
@@ -61,6 +63,47 @@ async def play_music(
     if source == "local":
         return await player.play_local(query)
     return await player.play_youtube(query, kind)
+
+
+@mcp.tool()
+async def play_wave(mood: Mood = "auto") -> str:
+    """«Моя волна» — бесконечный поток под вкус хозяина и время суток, как у Алисы.
+    Зови на «включи музыку», «включи мою волну», «поставь что-нибудь» без артиста.
+    mood: auto (под время суток — по умолчанию), energetic («бодрое», «для спорта»),
+    calm («спокойное», «расслабиться»), focus («для работы», «фоном»),
+    sleep («для сна»), discover («что-нибудь новое», «незнакомое»)."""
+    player = devices.current_player()
+    return await player.play_wave(mood) if player else NO_DEVICE
+
+
+@mcp.tool()
+async def play_liked(query: str | None = None) -> str:
+    """Лайкнутые треки («Моя музыка») вперемешку: «включи мои лайки», «включи любимое».
+    query — отфильтровать по исполнителю/названию («включи моё любимое из Кино»)."""
+    player = devices.current_player()
+    return await player.play_liked(query) if player else NO_DEVICE
+
+
+@mcp.tool()
+async def rate_track(value: Literal["like", "dislike", "none"], which: Literal["current", "previous"] = "current") -> str:
+    """Лайк/дизлайк трека. like — «нравится», «сохрани» (трек навсегда в «Моей музыке»);
+    dislike — «не нравится», «не включай больше» (сразу переключит, больше не прозвучит,
+    исполнитель после двух дизлайков — реже); none — снять оценку.
+    which=previous — «лайкни прошлую песню»."""
+    player = devices.current_player()
+    if player is None:
+        return NO_DEVICE
+    values: dict[str, Rating | None] = {"like": 1, "dislike": -1, "none": None}
+    return await player.rate(values[value], which=which)
+
+
+@mcp.tool()
+async def music_taste_note(text: str) -> str:
+    """Запомнить музыкальное предпочтение для «Моей волны»: «я не люблю рэп»,
+    «утром хочу русский рок», «больше джаза по вечерам». text — суть коротко, от
+    третьего лица: «не любит рэп». Учитывается в следующих подборках."""
+    library.add_note(text)
+    return "Запомнил, учту в подборках."
 
 
 @mcp.tool()

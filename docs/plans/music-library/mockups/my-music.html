@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Моя музыка — макет</title>
+<style>
+  :root { --bg:#0b0f14; --surface:#161c24; --surface-2:#232b36; --border:#1f2731; --text:#e7ecf2; --dim:#8a96a3; --accent:#4fd1c5; --danger:#ff6369; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,system-ui,sans-serif; }
+  .phone { max-width:390px; margin:24px auto; border:1px solid var(--border); border-radius:24px; overflow:hidden; }
+  header { padding:14px 16px; font-weight:600; display:flex; gap:10px; align-items:center }
+  .wave { margin:4px 16px 16px; padding:18px; border-radius:18px; background:linear-gradient(135deg,#1d3b3a,#232b36); }
+  .wave h2 { margin:0 0 4px; font-size:20px } .wave p { margin:0 0 14px; color:var(--dim); font-size:13px }
+  .play { border:none; background:var(--accent); color:var(--bg); font-weight:600; border-radius:20px; padding:9px 18px }
+  .moods { display:flex; gap:8px; overflow-x:auto; margin-top:14px }
+  .mood { flex:none; font-size:13px; border:1px solid var(--border); border-radius:14px; padding:5px 11px; color:var(--text) }
+  .mood.on { border-color:var(--accent); color:var(--accent) }
+  .tabs { display:flex; gap:18px; padding:0 16px; border-bottom:1px solid var(--border); font-size:14px }
+  .tabs span { padding:10px 0; color:var(--dim) } .tabs .on { color:var(--text); border-bottom:2px solid var(--accent) }
+  .toolbar { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; font-size:13px; color:var(--dim) }
+  .item { display:flex; align-items:center; gap:12px; padding:10px 16px }
+  .cover { width:40px; height:40px; border-radius:8px; background:var(--surface-2); flex:none }
+  .t { flex:1; min-width:0 } .t b { display:block; font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .t small { color:var(--dim); font-size:12px }
+  .heart { color:var(--danger) } .x { color:var(--dim) }
+  .storage { margin:12px 16px 20px; font-size:12px; color:var(--dim) }
+  .meter { height:6px; border-radius:3px; background:var(--surface-2); margin:6px 0; overflow:hidden; display:flex }
+  .meter i { display:block; height:6px }
+  h3 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim); padding:0 16px; margin:20px 0 6px; max-width:390px; margin-inline:auto }
+</style>
+</head>
+<body>
+<h3>Экран «Моя музыка» (открывается из шапки)</h3>
+<div class="phone">
+  <header>← Моя музыка</header>
+
+  <div class="wave">
+    <h2>Моя волна</h2>
+    <p>Сейчас вечер среды — подберу поспокойнее</p>
+    <button class="play">▶ Слушать</button>
+    <div class="moods">
+      <span class="mood on">Под время суток</span>
+      <span class="mood">Бодрое</span>
+      <span class="mood">Спокойное</span>
+      <span class="mood">Для работы</span>
+      <span class="mood">Для сна</span>
+      <span class="mood">Незнакомое</span>
+    </div>
+  </div>
+
+  <div class="tabs"><span class="on">Лайки · 214</span><span>Скрытые · 9</span></div>
+  <div class="toolbar"><span>▶ Перемешать</span><span>по дате ▾</span></div>
+
+  <div class="item"><div class="cover"></div><div class="t"><b>No Surprises</b><small>Radiohead · 3:49</small></div><span class="heart">♥</span></div>
+  <div class="item"><div class="cover"></div><div class="t"><b>Звезда по имени Солнце</b><small>Кино · 3:45</small></div><span class="heart">♥</span></div>
+  <div class="item"><div class="cover"></div><div class="t"><b>Выхода нет</b><small>Сплин · 4:02</small></div><span class="heart">♥</span></div>
+  <div class="item"><div class="cover"></div><div class="t"><b>Teardrop</b><small>Massive Attack · 5:30</small></div><span class="heart">♥</span></div>
+
+  <div class="storage">
+    Место на сервере: 3,1 ГБ из 10 ГБ
+    <div class="meter"><i style="width:22%;background:var(--danger)"></i><i style="width:9%;background:var(--dim)"></i></div>
+    <span style="color:var(--danger)">■</span> лайки 2,2 ГБ &nbsp; <span>■</span> кэш 0,9 ГБ (вытесняется сам)
+  </div>
+</div>
+
+<h3>Вкладка «Скрытые» — дизлайки, можно вернуть</h3>
+<div class="phone">
+  <div class="tabs"><span>Лайки · 214</span><span class="on">Скрытые · 9</span></div>
+  <div class="item"><div class="cover"></div><div class="t"><b>Какой-то трек</b><small>Исполнитель · скрыт 3 дня назад</small></div><span class="x">Вернуть</span></div>
+  <div class="item"><div class="cover"></div><div class="t"><b>Исполнитель целиком</b><small>звучит реже · 2 дизлайка</small></div><span class="x">Вернуть</span></div>
+</div>
+</body>
+</html>

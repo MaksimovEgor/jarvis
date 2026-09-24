@@ -65,8 +65,17 @@ class Settings(BaseSettings):
     # YouTube с asus напрямую не открывается — и поиск, и скачивание идут
     # через SOCKS-туннель (тот же, что у Edge TTS).
     youtube_proxy: str = ""
+    # Всё хранилище музыки: лайки (liked, не вытесняются) + кэш (LRU,
+    # занимает то, что осталось от лимита) — app/music/storage.py.
     music_cache_dir: str = "data/music/cache"
-    music_cache_max_mb: int = 2048
+    music_liked_dir: str = "data/music/liked"
+    music_storage_max_mb: int = 10240
+    # Оценки, прослушивания, зёрна рекомендаций — app/music/library.py.
+    music_library_db: str = "data/music/library.db"
+    # Профиль Hermes «dj» — музыкальный вкус и рекомендации (app/music/taste.py).
+    # Недоступен — тот же запрос уходит в LLM_*, а волна играет и без него.
+    dj_hermes_url: str = "http://127.0.0.1:8643"
+    dj_hermes_api_key: str = ""
     radio_browser_url: str = "https://de1.api.radio-browser.info"
     # Адрес самого ядра для mpv: длинное с YouTube он берёт потоком из /media/yt.
     core_url: str = "http://127.0.0.1:8000"

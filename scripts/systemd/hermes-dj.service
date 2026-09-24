@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes профиль dj — музыкальный вкус и рекомендации Джарвиса (API 127.0.0.1:8643)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run
+WorkingDirectory=%h/.hermes/profiles/dj
+Environment=HERMES_HOME=%h/.hermes/profiles/dj
+Environment=PATH=%h/.hermes/node:%h/.hermes/hermes-agent/venv/bin:%h/.hermes/node/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=VIRTUAL_ENV=%h/.hermes/hermes-agent/venv
+Restart=always
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

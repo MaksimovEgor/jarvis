@@ -27,17 +27,18 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
 from yarl import URL
 
 from app.config import settings
-from app.music.models import LONG_SECONDS, Kind, Track
+from app.music import storage
+from app.music.models import LONG_SECONDS, Kind, Track, clean_title
 
 logger = logging.getLogger("jarvis.youtube")
 
-AUDIO_EXTS = (".m4a", ".webm", ".opus", ".mp3")
 # В выдаче поиска бывают каналы и плейлисты («Группа КИНО») — нужны только видео.
 _VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 # Длиннее — почти всегда часовые сборки и стримы, в очереди они не нужны.
@@ -45,6 +46,10 @@ MAX_TRACK_SECONDS = 15 * 60
 MIN_TRACK_SECONDS = 60
 
 _inflight: dict[str, asyncio.Task[Path]] = {}
+# id → (исполнитель, длительность) из метаданных скачанного.
+_meta: dict[str, tuple[str | None, float | None]] = {}
+_TOPIC = " - Topic"
+_CHANNEL_NOISE = re.compile(r"\s*(?:VEVO|Official|Official Channel|Music)$", re.IGNORECASE)
 # id → (прямая ссылка, когда получена). googlevideo живёт ~6ч.
 _stream_urls: dict[str, tuple[str, float]] = {}
 STREAM_URL_TTL = 4 * 3600
@@ -89,21 +94,41 @@ async def _run(*args: str, timeout: float = 60) -> str:
     return out.decode()
 
 
-async def _list(url: str, limit: int, kind: Kind = "music") -> list[Track]:
+def _artist(channel: str, title: str) -> str | None:
+    """«Foo Fighters - Topic» → Foo Fighters; канал, если он есть в названии
+    («In The End - Linkin Park» у канала Linkin Park); иначе «Кино - Группа
+    крови» → Кино; иначе канал без «VEVO/Official»."""
+    if channel.endswith(_TOPIC):
+        return channel[: -len(_TOPIC)].strip() or None
+    clean = _CHANNEL_NOISE.sub("", channel).strip() if channel and channel != "NA" else ""
+    if clean and clean.casefold() in title.casefold():
+        return clean
+    if " - " in title:
+        return title.split(" - ", 1)[0].strip() or None
+    return clean or None
+
+
+async def _list(url: str, limit: int, kind: Kind = "music", timeout: float = 60) -> list[Track]:
     out = await _run(
         "--flat-playlist", "--playlist-end", str(limit),
-        "--print", "%(id)s\t%(duration)s\t%(title)s", url,
+        "--print", "%(id)s\t%(duration)s\t%(channel)s\t%(title)s", url,
+        timeout=timeout,
     )
     tracks = []
     for line in out.splitlines():
-        video_id, duration, title = (line.split("\t", 2) + ["", ""])[:3]
+        video_id, duration, channel, title = (line.split("\t", 3) + ["", "", ""])[:4]
         if not _VIDEO_ID.match(video_id):
             continue
         try:
             seconds: float | None = float(duration)
         except ValueError:
             seconds = None
-        tracks.append(Track(title=title, source="youtube", ref=video_id, duration=seconds, kind=kind))
+        if kind == "music":
+            title = clean_title(title)
+        tracks.append(Track(
+            title=title, source="youtube", ref=video_id, duration=seconds, kind=kind,
+            artist=_artist(channel, title) if kind == "music" else None,
+        ))
     return tracks
 
 
@@ -129,59 +154,76 @@ async def mix(seed: Track, limit: int = 25) -> list[Track]:
     return [t for t in tracks if t.ref != seed.ref and _fits(t)]
 
 
-def _cached(video_id: str) -> Path | None:
-    cache = Path(settings.music_cache_dir)
-    return next((p for p in cache.glob(f"{video_id}.*") if p.suffix in AUDIO_EXTS), None)
+# Волна (app/music/wave.py) берёт музыку из YouTube Music: там песни, а не
+# клипы, лайвы и «1 hour loop». Короткие таймауты — волна не ждёт.
+MUSIC_TIMEOUT = 25.0
 
 
-def _prune_cache(keep: Path) -> None:
-    """LRU по mtime: при каждом проигрывании файл «трогается» в download()."""
-    files = sorted(
-        (p for p in Path(settings.music_cache_dir).iterdir() if p.suffix in AUDIO_EXTS),
-        key=lambda p: p.stat().st_mtime,
-    )
-    total = sum(p.stat().st_size for p in files)
-    limit = settings.music_cache_max_mb * 1024 * 1024
-    for path in files:
-        if total <= limit:
-            break
-        if path != keep:
-            total -= path.stat().st_size
-            path.unlink(missing_ok=True)
+async def music_search(query: str, limit: int = 8) -> list[Track]:
+    """Песни YouTube Music. У выдачи нет исполнителя и длительности — они
+    появятся при скачивании (meta)."""
+    url = f"https://music.youtube.com/search?q={quote_plus(query)}#songs"
+    return [t for t in await _list(url, limit, timeout=MUSIC_TIMEOUT) if _fits(t)]
 
 
-async def _download(video_id: str) -> Path:
-    if path := _cached(video_id):
-        path.touch()
+async def music_radio(seed_ref: str, limit: int = 25) -> list[Track]:
+    """Радио YouTube Music по треку — «похожее» для волны (seed исключён)."""
+    url = f"https://music.youtube.com/watch?v={seed_ref}&list=RDAMVM{seed_ref}"
+    tracks = await _list(url, limit, timeout=MUSIC_TIMEOUT)
+    return [t for t in tracks if t.ref != seed_ref and _fits(t)]
+
+
+async def _download(video_id: str, timeout: float) -> Path:
+    if path := storage.path_for(video_id):
         return path
-    cache = Path(settings.music_cache_dir)
+    cache = storage.cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
-    await _run(
+    # after_move-печать не отменяет скачивание, а метаданные (исполнитель)
+    # в выдаче поиска YouTube Music бывают пустыми — берём их отсюда.
+    out = await _run(
         "-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--no-progress",
+        "--print", "after_move:%(artist)s\t%(channel)s\t%(duration)s\t%(title)s",
         "-o", str(cache / "%(id)s.%(ext)s"),
         f"https://www.youtube.com/watch?v={video_id}",
-        timeout=180,
+        timeout=timeout,
     )
-    path = _cached(video_id)
+    _remember_meta(video_id, out)
+    path = storage.path_for(video_id)
     if path is None:
         raise RuntimeError("yt-dlp ничего не скачал")
-    _prune_cache(keep=path)
+    storage.prune(keep=path)
     return path
 
 
-async def download(track: Track) -> Path:
+def _remember_meta(video_id: str, out: str) -> None:
+    line = out.strip().splitlines()[-1] if out.strip() else ""
+    artist, channel, duration, title = (line.split("\t", 3) + ["", "", "", ""])[:4]
+    artist = artist.split(",")[0].strip() if artist not in ("", "NA") else _artist(channel, title)
+    try:
+        seconds: float | None = float(duration)
+    except ValueError:
+        seconds = None
+    _meta[video_id] = (artist, seconds)
+
+
+def meta(video_id: str) -> tuple[str | None, float | None]:
+    """Исполнитель и длительность, узнанные при скачивании (или (None, None))."""
+    return _meta.get(video_id, (None, None))
+
+
+async def download(track: Track, timeout: float = 180) -> Path:
     """Параллельные запросы одного трека (предзагрузка + «следующий»)
     ждут одну и ту же загрузку."""
     task = _inflight.get(track.ref)
     if task is None:
-        task = asyncio.create_task(_download(track.ref))
+        task = asyncio.create_task(_download(track.ref, timeout))
         _inflight[track.ref] = task
         task.add_done_callback(lambda _: _inflight.pop(track.ref, None))
-    return await task
+    return await asyncio.shield(task)
 
 
 def cached(track: Track) -> Path | None:
-    return _cached(track.ref) if track.source == "youtube" else None
+    return storage.path_for(track.ref) if track.source == "youtube" else None
 
 
 async def stream_url(video_id: str, refresh: bool = False) -> str:

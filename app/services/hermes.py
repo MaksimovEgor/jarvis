@@ -118,7 +118,7 @@ async def _stream(conversation: str, user_text: str, on_tool: Callable[[str], No
                 elif not line.startswith("data: "):
                     continue
                 elif event in _FINAL_EVENTS:
-                    return _parse_output(json.loads(line[len("data: "):])["response"])
+                    return parse_output(json.loads(line[len("data: "):])["response"])
                 elif event == "response.output_item.done" and on_tool is not None:
                     item = json.loads(line[len("data: "):]).get("item") or {}
                     if item.get("type") == "function_call":
@@ -138,7 +138,7 @@ def _tool_name(item: dict[str, Any]) -> str:
     return name
 
 
-def _parse_output(data: dict[str, Any]) -> tuple[str, list[str]]:
+def parse_output(data: dict[str, Any]) -> tuple[str, list[str]]:
     # Вызовы инструментов в output уже выполнены на стороне Hermes — берём
     # только имена для лога/ответа API.
     texts: list[str] = []

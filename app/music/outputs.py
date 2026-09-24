@@ -29,7 +29,7 @@ from app.music.mpv import MPV
 
 logger = logging.getLogger("jarvis.outputs")
 
-EndHandler = Callable[[str], Awaitable[None]]  # reason: "eof" | "error"
+EndHandler = Callable[[str], Awaitable[None]]  # reason: "eof" | "error" | "stall"
 
 # id событий хода — «<запуск ядра>:<номер>»: после рестарта ядра номера
 # начинаются заново, и старый Last-Event-ID браузера не должен их скрыть.
@@ -77,6 +77,10 @@ class Output(ABC):
 
     def prefetch(self, track: Track) -> None:
         """Подготовить следующий трек заранее, если выходу это помогает."""
+
+    def set_meta(self, meta: dict[str, Any]) -> None:
+        """Что показать о текущем треке рядом с плеером (оценка и т.п.).
+        Экрана у mpv нет — по умолчанию ничего."""
 
 
 class MpvOutput(Output):
@@ -149,6 +153,10 @@ class MpvOutput(Output):
 class WebOutput(Output):
     # Браузер без отчёта дольше этого — считаем, что вкладка закрыта/уснула.
     ALIVE_SECONDS = 45
+    # Сторож: должно играть, экран открыт, а позиция не растёт столько —
+    # трек завис, дальше. Браузер шлёт позицию раз в 10 с, поэтому не меньше 25.
+    STALL_SECONDS = 25.0
+    STALL_CHECK_SECONDS = 5.0
 
     def __init__(self, device: str) -> None:
         super().__init__()
@@ -167,6 +175,10 @@ class WebOutput(Output):
         self._event_id = 0
         # Вкладка на экране (visibilitychange) — иначе готовое шлём пушем.
         self._visible = True
+        # Когда позиция последний раз росла — для сторожа зависаний.
+        self._progress_at = time.time()
+        self._watchdog: asyncio.Task[None] | None = None
+        self._held = False
 
     # --- связь с браузером ------------------------------------------------
 
@@ -235,16 +247,26 @@ class WebOutput(Output):
             self._hls = bool(data["hls"])
         if data.get("visible") is not None:
             self._visible = bool(data["visible"])
+        if data.get("held") is not None:
+            self._held = bool(data["held"])
+            self._progress_at = time.time()
         if data.get("seq") != self._state["seq"]:
             return  # отчёт о прошлом треке
         if data.get("position") is not None:
-            self._reported_position = float(data["position"])
+            position = float(data["position"])
+            if self._reported_position is None or position > self._reported_position + 0.5:
+                self._progress_at = time.time()
+            self._reported_position = position
             self._reported_at = time.time()
         if "paused" in data:
             # Пауза с экрана блокировки/кнопкой колонки — просто принимаем.
             self._state["paused"] = bool(data["paused"])
+            self._progress_at = time.time()
         if data.get("ended"):
             await self._ended("eof")
+        elif data.get("stalled"):
+            logger.warning("%s: браузер говорит, что %s завис", self.device, self._state["src"])
+            await self._ended("stall")
         elif data.get("error"):
             logger.warning("%s: браузер не смог проиграть %s: %s", self.device, self._state["src"], data["error"])
             await self._ended("error")
@@ -269,8 +291,43 @@ class WebOutput(Output):
         self._state = {
             "seq": self._state["seq"] + 1, "src": await self._src(track), "title": track.title,
             "start": start, "paused": paused, "live": track.source == "radio",
+            # Оценить можно только трек с YouTube — у радио и файлов нет id.
+            "ref": track.ref if track.source == "youtube" else None, "rating": None,
         }
         self._reported_position, self._reported_at = start, time.time()
+        self._progress_at = time.time()
+        if self._watchdog is None:
+            self._watchdog = asyncio.create_task(self._watch_stall())
+        self._push(self.snapshot())
+
+    def _busy(self) -> bool:
+        """Идёт ход (голосовая команда) — музыка на клиенте придержана, это не зависание."""
+        from app.turns import turns  # turns → devices → outputs: импорт здесь, иначе цикл
+
+        return bool(turns.active(self.device))
+
+    async def _watch_stall(self) -> None:
+        while True:
+            await asyncio.sleep(self.STALL_CHECK_SECONDS)
+            state = self._state
+            if state["src"] is None or state["paused"] or state.get("live") or not self.watching:
+                self._progress_at = time.time()
+                continue
+            if self._held or self._busy():
+                self._progress_at = time.time()
+                continue
+            if time.time() - self._progress_at > self.STALL_SECONDS:
+                logger.warning("%s: позиция не растёт %.0f с — трек завис", self.device, self.STALL_SECONDS)
+                self._progress_at = time.time()
+                try:
+                    await self._ended("stall")
+                except Exception:
+                    logger.exception("Сторож не смог переключить трек")
+
+    def set_meta(self, meta: dict[str, Any]) -> None:
+        if self._state["src"] is None or all(self._state.get(k) == v for k, v in meta.items()):
+            return
+        self._state.update(meta)
         self._push(self.snapshot())
 
     async def set_paused(self, paused: bool) -> None:
@@ -280,6 +337,7 @@ class WebOutput(Output):
             # Позиция на момент паузы, иначе position() продолжит «тикать».
             self._reported_position = await self.position()
             self._reported_at = time.time()
+            self._progress_at = time.time()
         self._state["paused"] = paused
         self._push(self.snapshot())
 
@@ -292,6 +350,7 @@ class WebOutput(Output):
 
     async def seek(self, position: float) -> None:
         self._reported_position, self._reported_at = position, time.time()
+        self._progress_at = time.time()
         self._push({"type": "seek", "seq": self._state["seq"], "position": position})
 
     async def position(self) -> float | None:

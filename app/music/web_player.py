@@ -34,6 +34,10 @@ class PlayerReport(BaseModel):
     paused: bool | None = None
     ended: bool = False
     error: str | None = None
+    # Браузер ждёт данные дольше 10 с, хотя должен играть (<audio> waiting).
+    stalled: bool = False
+    # Экран придержал музыку (слушает «Джарвис», играет объявление) — не зависание.
+    held: bool | None = None
     volume_supported: bool | None = None
     hls: bool | None = None
     # Вкладка на экране или свёрнута — решает, слать ли пуш.

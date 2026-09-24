@@ -1,0 +1,3 @@
+# Тесты: .venv/bin/pip install -r requirements-dev.txt && .venv/bin/pytest
+pytest
+pytest-asyncio

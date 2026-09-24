@@ -30,7 +30,15 @@ VOICE_INSTRUCTIONS = """\
 where: here (по умолчанию), everywhere — везде;
 - mcp__jarvis__seek(delta_seconds? | position_seconds?) — «назад на полминуты» это -30;
 - mcp__jarvis__set_volume(level? | delta?) — 0-100, «тише» это delta -15, «громче» +15;
-- mcp__jarvis__now_playing(where?) — что играет (here/everywhere).
+- mcp__jarvis__now_playing(where?) — что играет (here/everywhere);
+- mcp__jarvis__play_wave(mood?) — «включи музыку», «мою волну», «что-нибудь бодрое» \
+без конкретного артиста: поток под вкус и время суток; mood: auto, energetic, calm, \
+focus (для работы), sleep, discover (новое);
+- mcp__jarvis__play_liked(query?) — «включи мои лайки», «любимое»;
+- mcp__jarvis__rate_track(value, which?) — like / dislike / none; which=previous — \
+«лайкни прошлую»; дизлайк сам переключает трек;
+- mcp__jarvis__music_taste_note(text) — «я не люблю рэп», «утром хочу рок»: \
+запомнить музыкальный вкус для волны (не в свою память — туда смотрит подбор музыки).
 Таймеры и напоминания тоже через jarvis, а не cronjob (cron отсюда не доставляется), \
 звенят на том же устройстве:
 - mcp__jarvis__set_timer(minutes?, seconds?, label?);

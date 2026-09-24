@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 
 from app.music import devices
-from app.music.models import Kind
+from app.music.models import Kind, Mood
 from app.timers import timers
 
 
@@ -46,6 +46,27 @@ _LOUDER = re.compile(r"^(?:сделай\s+)?(?:по)?громче$")
 _QUIETER = re.compile(r"^(?:сделай\s+)?(?:по)?тише$")
 _VOLUME = re.compile(r"^(?:сделай\s+|поставь\s+)?громкость\s+(?:на\s+)?(\d{1,3})(?:\s*процент\w*)?$")
 _NOW = re.compile(r"^(?:что\s+(?:сейчас\s+|это\s+)*играет|что\s+за\s+(?:песня|трек)|как\s+называется\s+(?:эта\s+)?(?:песня|трек))$")
+_LIKE = re.compile(r"^(?:(?:поставь\s+)?лайк|лайкни(?:\s+(?:это|эту|ее|его|трек|песню))?|мне\s+(?:это\s+)?нравится|нравится|класс(?:ная\s+песня)?|сохрани\s+(?:эту\s+)?(?:песню|трек))$")
+_DISLIKE = re.compile(
+    r"^(?:(?:поставь\s+)?дизлайк|мне\s+(?:это\s+)?не\s+нравится|не\s+нравится|"
+    r"(?:больше\s+)?не\s+(?:включай|ставь)(?:\s+больше)?(?:\s+(?:это|эту\s+песню|этот\s+трек))?)$"
+)
+# «Включи мою музыку / лайки / любимое» — лайки перемешанные.
+_LIKED = re.compile(
+    rf"^{_PLAY_VERB}{_POLITE}\s+(?:мою\s+музыку|мои\s+лайки|лайки|лайкнут\w*(?:\s+(?:песни|треки))?|"
+    r"(?:мо[июе]\s+)?любим\w*(?:\s+(?:музыку|песни|треки))?|избранн\w*)$"
+)
+# «Включи музыку», «включи мою волну», «что-нибудь бодрое», «музыку для сна».
+_WAVE_BARE = {"музыку", "волну", "мою волну", "что-нибудь", "что нибудь", "какую-нибудь музыку", "музыку какую-нибудь"}
+_WAVE_HEAD = re.compile(r"^(?:мою\s+волну|волну|что[- ]нибудь|какую[- ]нибудь\s+музыку|музыку|песни)\s+(.+)$")
+_WAVE_TAIL = re.compile(r"^(.+?)\s+(?:музыку|песни|волну)$")
+_MOODS: tuple[tuple[Mood, re.Pattern[str]], ...] = (
+    ("sleep", re.compile(r"для\s+сна|перед\s+сном|на\s+ночь|чтобы\s+(?:за)?снуть|колыбельн")),
+    ("focus", re.compile(r"для\s+(?:работы|учебы|концентрации|фона)|фонов\w*|сосредоточ")),
+    ("energetic", re.compile(r"бодр|энергичн|весел|драйв|зажигательн|для\s+(?:спорта|тренировки|пробежки)")),
+    ("calm", re.compile(r"спокойн|расслаб|релакс|лиричн|медленн|тих\w*")),
+    ("discover", re.compile(r"\bнов|незнаком|свеж")),
+)
 _RESUME_BOOK = re.compile(r"^(?:продолжи|продолжай|давай\s+дальше)\s+(?:слушать\s+)?(?:аудио)?книгу$")
 _TIMER = re.compile(r"^(?:поставь\s+|заведи\s+|засеки\s+)?таймер\s+на\s+(.+)$")
 _RADIO = re.compile(rf"^{_PLAY_VERB}{_POLITE}\s+радио(?:станцию)?(?:\s+(.+))?$")
@@ -109,6 +130,16 @@ def _duration(spec: str) -> float | None:
     return total or None
 
 
+def _wave_mood(query: str) -> Mood | None:
+    """Настроение волны по хвосту «включи …»; None — это не волна, а поиск."""
+    if query in _WAVE_BARE:
+        return "auto"
+    m = _WAVE_HEAD.match(query) or _WAVE_TAIL.match(query)
+    if not m:
+        return None
+    return next((mood for mood, pattern in _MOODS if pattern.search(m.group(1))), None)
+
+
 def _clock(seconds: float) -> str:
     return time.strftime("%H:%M", time.localtime(time.time() + seconds))
 
@@ -146,6 +177,10 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
         return FastReply(await player.volume(delta=-15), "volume")
     if m := _VOLUME.match(t):
         return FastReply(await player.volume(level=int(m.group(1))), "volume")
+    if _LIKE.match(t):
+        return FastReply(await player.rate(1), "rate_track")
+    if _DISLIKE.match(t):
+        return FastReply(await player.rate(-1), "rate_track")
     if _NOW.match(t):
         return FastReply(await player.now_playing(), "now_playing")
 
@@ -167,16 +202,18 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
             reply = await player.play_radio(rest, None, None)
         return None if reply.startswith(_NOT_FOUND) else FastReply(reply, "play_radio")
 
+    if _LIKED.match(t):
+        return FastReply(await player.play_liked(), "play_liked")
+
     if m := _PLAY.match(t):
         query = m.group(1).strip()
+        if (mood := _wave_mood(query)) is not None:
+            return FastReply(await player.play_wave(mood), "play_wave")
         if _NOT_MEDIA.match(query) or _NEEDS_AGENT.search(query) or len(query) < 2:
             return None
         kind: Kind = "audiobook" if _BOOK.search(query) else "podcast" if _PODCAST.search(query) else "music"
         if kind == "audiobook":
             query = _BOOK.sub(" ", query).strip() or query
-        # «Включи музыку» без уточнений — пусть Hermes подберёт по вкусу хозяина.
-        if query in ("музыку", "что-нибудь", "что нибудь"):
-            return None
         reply = await player.play_youtube(query, kind)
         return None if reply.startswith(_NOT_FOUND) else FastReply(reply, "play_music")
 

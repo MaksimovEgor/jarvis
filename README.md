@@ -74,7 +74,7 @@ Hermes ──MCP /mcp (streamable HTTP)─┐
 builtin-агент (tools/music.py) ─────┼─► player.py ── единственный владелец mpv
 listener ──POST /music/duck|unduck ─┘     ├ очередь: трек + YouTube Mix (RD<id>, ~20 похожих)
                                           ├ youtube.py: yt-dlp из .venv через YOUTUBE_PROXY
-                                          │   → data/music/cache (LRU, MUSIC_CACHE_MAX_MB)
+                                          │   → data/music/cache + liked (MUSIC_STORAGE_MAX_MB)
                                           └ radio.py: Radio Browser API (без ключа)
 ```
 
@@ -114,6 +114,24 @@ Hermes ─MCP─► devices.current_player() ◄──────────�
    web:<id> → Player(WebOutput)  — SSE /player/events → <audio> в браузере,
                                    браузер шлёт /player/report (позиция, конец трека)
 ```
+
+## Моя волна, лайки, профиль dj
+
+Полное описание — `docs/architecture.html#wave`, план и решения — `docs/plans/music-library/`.
+
+```
+«включи музыку» ─► Wave (app/music/wave.py) — решает мгновенно, без LLM
+                    ├ лайки + радио YouTube Music + поиск по зёрнам dj
+                    └ compose(): время суток, настроение, баны, штрафы
+                 ◄─ taste.py (фоном) ◄─► Hermes профиль «dj» :8643 (своя память)
+лайк/дизлайк ─► library.db (SQLite) + storage: liked/ навсегда, cache/ LRU, всего 10 ГБ
+```
+
+- Профиль dj ставится один раз: `ssh asus 'bash -s' < scripts/hermes-dj/setup.sh`
+  (код уже должен быть выкачен). Скрипт впишет `DJ_HERMES_API_KEY` в `.env` ядра.
+- Метрика качества: `curl http://127.0.0.1:8000/library/stats?days=7` — доля
+  дослушанных треков волны (цель ≥ 0.7) и число зависаний (цель 0).
+- Тесты: `.venv/bin/pip install -r requirements-dev.txt && .venv/bin/pytest`.
 
 - `/media/yt/<id>` — из кэша или потоком googlevideo через туннель с Range
   (Safari без Range не играет и не перематывает). `/media/ref/<token>` —

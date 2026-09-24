@@ -4,7 +4,9 @@ import { computed, ref, watch } from 'vue'
 import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, type SpeechMore } from './api'
 import BackgroundTasks from './components/BackgroundTasks.vue'
 import ChatLog from './components/ChatLog.vue'
+import MyMusic from './components/MyMusic.vue'
 import PlayerBar from './components/PlayerBar.vue'
+import RateToast from './components/RateToast.vue'
 import TalkButton from './components/TalkButton.vue'
 import { useEarcon } from './composables/useEarcon'
 import { useMusic } from './composables/useMusic'
@@ -27,7 +29,40 @@ const {
   live: musicLive,
   position: musicPosition,
   duration: musicDuration,
+  trackRef: musicRef,
+  rating: musicRating,
+  origin: musicOrigin,
+  from: musicFrom,
 } = music
+
+// «Моя музыка» — экран поверх чата; всплывашка после оценки с «Отменить».
+const showLibrary = ref(false)
+const toast = ref<{ text: string; undoRef: string | null } | null>(null)
+let toastTimer: number | null = null
+
+function showToast(text: string, undoRef: string | null = null): void {
+  toast.value = { text, undoRef }
+  if (toastTimer !== null) clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => (toast.value = null), 4000)
+}
+
+function onLike(): void {
+  const wasLiked = musicRating.value === 1
+  music.like()
+  showToast(wasLiked ? 'Убрал из «Моей музыки»' : '♥ Сохранил в «Мою музыку»')
+}
+
+function onDislike(): void {
+  const ref = musicRef.value
+  const title = musicTitle.value
+  music.dislike()
+  showToast(`Больше не включу «${title ?? 'этот трек'}»`, ref)
+}
+
+function onUndo(): void {
+  if (toast.value?.undoRef) music.unrate(toast.value.undoRef)
+  toast.value = null
+}
 
 // «Джарвис» слышен всегда, кроме момента записи команды: и пока Джарвис
 // думает над прошлой просьбой, и пока говорит (голос тогда замолкает).
@@ -375,6 +410,14 @@ function errorText(e: unknown): string {
       Джарвис
       <span class="app__spacer" />
       <button
+        class="app__icon"
+        aria-label="Моя музыка"
+        title="Моя музыка: лайки, «Моя волна», место на сервере"
+        @click="showLibrary = true"
+      >
+        <svg viewBox="0 0 24 24"><path d="M12 3v10.6A4 4 0 1 0 14 17V7h4V3h-6z" /></svg>
+      </button>
+      <button
         v-if="notifications.supported && !notifications.enabled.value"
         class="app__wake"
         :title="notifications.error.value ?? 'Сообщать о готовых задачах, когда Джарвис свёрнут'"
@@ -401,11 +444,17 @@ function errorText(e: unknown): string {
       :live="musicLive"
       :position="musicPosition"
       :duration="musicDuration"
+      :rateable="musicRef !== null"
+      :rating="musicRating"
+      :origin="musicOrigin"
+      :from="musicFrom"
       @toggle="music.toggle"
       @next="music.next"
       @previous="music.previous"
       @stop="music.stop"
       @seek="music.seek"
+      @like="onLike"
+      @dislike="onDislike"
     />
 
     <BackgroundTasks :tasks="backgroundTasks" @cancel="onCancel" />
@@ -424,6 +473,9 @@ function errorText(e: unknown): string {
         <TalkButton :status="status" :send="draft.trim().length > 0" @press="onPress" />
       </form>
     </footer>
+
+    <MyMusic v-if="showLibrary" @close="showLibrary = false" @played="(text) => showToast(text)" />
+    <RateToast v-if="toast" :text="toast.text" :undo="toast.undoRef !== null" @undo="onUndo" />
   </main>
 </template>
 
@@ -443,6 +495,7 @@ function errorText(e: unknown): string {
     font-weight: 600;
     letter-spacing: 0.02em;
     border-bottom: 1px solid var(--border);
+    min-width: 0;
   }
 
   &__dot {
@@ -469,7 +522,31 @@ function errorText(e: unknown): string {
     flex: 1;
   }
 
+  &__icon {
+    flex: none;
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+
+    svg {
+      width: 18px;
+      height: 18px;
+      fill: currentColor;
+    }
+  }
+
   &__wake {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     padding: 6px 12px;
     border-radius: 999px;
     border: 1px solid var(--border);
