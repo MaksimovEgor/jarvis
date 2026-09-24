@@ -20,7 +20,8 @@ from mcp.server.mcpserver import MCPServer
 
 from app.music import devices
 from app.music.library import library
-from app.music.models import Kind, Mood, Rating
+from app.music.models import Diversity, Kind, Language, Mood, MoodEnergy, Rating, WaveSpec
+from app.music.wave import MOOD_PRESET, spec_mood
 from app.music.player import Player
 from app.services import speaker, telegram
 from app.timers import timers
@@ -62,18 +63,44 @@ async def play_music(
         return NO_DEVICE
     if source == "local":
         return await player.play_local(query)
-    return await player.play_youtube(query, kind)
+    return await player.play_query(query, kind)
 
 
 @mcp.tool()
-async def play_wave(mood: Mood = "auto") -> str:
-    """«Моя волна» — бесконечный поток под вкус хозяина и время суток, как у Алисы.
-    Зови на «включи музыку», «включи мою волну», «поставь что-нибудь» без артиста.
-    mood: auto (под время суток — по умолчанию), energetic («бодрое», «для спорта»),
-    calm («спокойное», «расслабиться»), focus («для работы», «фоном»),
-    sleep («для сна»), discover («что-нибудь новое», «незнакомое»)."""
+async def play_wave(
+    mood: Mood = "auto",
+    activity: str | None = None,
+    mood_energy: MoodEnergy | None = None,
+    character: Diversity | None = None,
+    language: Language | None = None,
+    station: str | None = None,
+) -> str:
+    """«Моя волна» — бесконечный поток под вкус хозяина и время суток (Яндекс
+    Музыка + YouTube). Зови на «включи музыку», «мою волну», «что-нибудь» без
+    артиста. Все настройки как в «Моей волне» Яндекса, можно сочетать:
+    mood_energy: active (бодрое), fun (весёлое), calm (спокойное), sad (грустное);
+    character: favorite (любимое), discover (незнакомое, «что-то новое»), popular;
+    language: russian, not-russian (иностранное), without-words (без слов);
+    activity — занятие: wake-up, run, workout, driving, road-trip, work-background,
+    study-background, party, romantic-date, beloved, fall-asleep, sex;
+    station — станция Яндекса: genre:rusrock, genre:jazz, epoch:nineties,
+    mood:dark, mood:winter … («включи русский рок», «музыку 90-х»).
+    mood — короткий вариант без Яндекса: auto, energetic, calm, focus, sleep, discover.
+    Примеры: «грустное на русском» → mood_energy=sad, language=russian;
+    «для бега» → activity=run; «незнакомое бодрое» → character=discover, mood_energy=active."""
     player = devices.current_player()
-    return await player.play_wave(mood) if player else NO_DEVICE
+    if player is None:
+        return NO_DEVICE
+    base = MOOD_PRESET[mood]
+    chosen = station or (f"activity:{activity}" if activity else None)
+    spec = WaveSpec(
+        station=chosen or base.station,
+        mood_energy=mood_energy or base.mood_energy,
+        diversity=character or base.diversity,
+        language=language or base.language,
+        label=" · ".join(x for x in (chosen, mood_energy, character, language) if x) or base.label,
+    )
+    return await player.play_wave(spec_mood(spec), spec=spec)
 
 
 @mcp.tool()

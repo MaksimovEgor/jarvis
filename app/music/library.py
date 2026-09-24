@@ -28,7 +28,7 @@ from app.music.models import FromWhere, Mood, Outcome, Rating, Slot, Track, clea
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracks (
     ref TEXT PRIMARY KEY, title TEXT NOT NULL, artist TEXT, duration REAL,
-    energy INTEGER, tags TEXT, added_at REAL NOT NULL
+    energy INTEGER, tags TEXT, added_at REAL NOT NULL, url TEXT, cover TEXT
 );
 CREATE TABLE IF NOT EXISTS ratings (ref TEXT PRIMARY KEY, value INTEGER NOT NULL, at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS plays (
@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS seeds (
 );
 """
 
+# Колонки, добавленные после первой версии, — ALTER TABLE при открытии.
+_MIGRATIONS = (("tracks", "url", "TEXT"), ("tracks", "cover", "TEXT"))
+
 DAY = 86400.0
 SeedBucket = Literal["similar", "discover"]
 
@@ -58,10 +61,13 @@ class TrackInfo:
     tags: list[str]
     rating: Rating | None
     added_at: float
+    url: str | None = None
+    cover: str | None = None
 
     def track(self, origin: Any = "liked") -> Track:
-        return Track(title=self.title, source="youtube", ref=self.ref, duration=self.duration,
-                     artist=self.artist, origin=origin)
+        source, service = source_of(self.ref)
+        return Track(title=self.title, source=source, ref=self.ref, duration=self.duration,
+                     artist=self.artist, origin=origin, service=service, url=self.url, cover=self.cover)
 
 
 @dataclass
@@ -84,6 +90,8 @@ class Stats:
     errors: int
     from_cache_share: float | None
     median_start_ms: int | None
+    # ym / yt / sc → {finished, skipped, ...}: откуда реально играли.
+    by_source: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,15 @@ class Seed:
     query: str
     bucket: SeedBucket
     reason: str = ""
+
+
+def source_of(ref: str) -> tuple[Any, Any]:
+    """(source, service) по ref: ym-… — Яндекс, sc-… — SoundCloud, иначе YouTube."""
+    if ref.startswith("ym-"):
+        return "yandex", "yandex"
+    if ref.startswith("sc-"):
+        return "soundcloud", "soundcloud"
+    return "youtube", "youtube"
 
 
 def artist_key(artist: str | None) -> str:
@@ -110,6 +127,10 @@ class Library:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
+            for table, column, kind in _MIGRATIONS:
+                known = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in known:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             self._conn = conn
         return self._conn
 
@@ -124,12 +145,14 @@ class Library:
         """Новые поля не затирают известные: у выдачи поиска нет исполнителя,
         а у того же трека из радио YouTube Music — есть."""
         self.db.execute(
-            """INSERT INTO tracks (ref, title, artist, duration, added_at) VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO tracks (ref, title, artist, duration, added_at, url, cover) VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(ref) DO UPDATE SET
                  title = excluded.title,
                  artist = COALESCE(tracks.artist, excluded.artist),
-                 duration = COALESCE(excluded.duration, tracks.duration)""",
-            (track.ref, clean_title(track.title), track.artist, track.duration, time.time()),
+                 duration = COALESCE(excluded.duration, tracks.duration),
+                 url = COALESCE(excluded.url, tracks.url),
+                 cover = COALESCE(excluded.cover, tracks.cover)""",
+            (track.ref, clean_title(track.title), track.artist, track.duration, time.time(), track.url, track.cover),
         )
 
     def set_artist(self, ref: str, artist: str | None, duration: float | None) -> None:
@@ -155,7 +178,7 @@ class Library:
     def _infos(self, where: str, params: tuple[Any, ...], order: str, limit: int, offset: int = 0) -> list[TrackInfo]:
         rows = self.db.execute(
             f"""SELECT t.ref, t.title, t.artist, t.duration, t.energy, t.tags, r.value AS rating,
-                       COALESCE(r.at, t.added_at) AS at
+                       COALESCE(r.at, t.added_at) AS at, t.url, t.cover
                 FROM tracks t LEFT JOIN ratings r ON r.ref = t.ref
                 WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?""",
             (*params, limit, offset),
@@ -163,7 +186,7 @@ class Library:
         return [
             TrackInfo(ref=r["ref"], title=r["title"], artist=r["artist"], duration=r["duration"],
                       energy=r["energy"], tags=json.loads(r["tags"]) if r["tags"] else [],
-                      rating=r["rating"], added_at=r["at"])
+                      rating=r["rating"], added_at=r["at"], url=r["url"], cover=r["cover"])
             for r in rows
         ]
 
@@ -177,6 +200,17 @@ class Library:
             where += " AND (t.title LIKE ? OR t.artist LIKE ?)"
             params = (f"%{query}%", f"%{query}%")
         return self._infos(where, params, "r.at DESC", limit, offset)
+
+    def import_likes(self, tracks: list[Track], now: float | None = None) -> int:
+        """Лайки из Яндекса: новые — в «Мою музыку», дизлайки Джарвиса не трогаем."""
+        now = now or time.time()
+        added = 0
+        for track in tracks:
+            self.upsert(track)
+            if self.rating(track.ref) is None:
+                self.rate(track.ref, 1, now)
+                added += 1
+        return added
 
     def liked_count(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM ratings WHERE value = 1").fetchone()[0]
@@ -355,8 +389,16 @@ class Library:
             "SELECT from_where FROM plays WHERE started_at > ? AND from_where IS NOT NULL", (since,))]
         starts = [r[0] for r in self.db.execute(
             "SELECT start_ms FROM plays WHERE started_at > ? AND start_ms IS NOT NULL", (since,))]
+        by_source: dict[str, dict[str, int]] = {}
+        for row in self.db.execute(
+            "SELECT ref, outcome, COUNT(*) AS n FROM plays WHERE started_at > ? AND outcome IS NOT NULL GROUP BY ref, outcome",
+            (since,),
+        ):
+            source = {"yandex": "ym", "soundcloud": "sc"}.get(source_of(row["ref"])[0], "yt")
+            bucket = by_source.setdefault(source, {})
+            bucket[row["outcome"]] = bucket.get(row["outcome"], 0) + row["n"]
         return Stats(
-            days=days, wave_finished=finished, wave_skipped=skipped, wave_disliked=disliked,
+            days=days, by_source=by_source, wave_finished=finished, wave_skipped=skipped, wave_disliked=disliked,
             wave_share=round(finished / judged, 3) if judged else None,
             stalls=stalls, errors=errors,
             from_cache_share=round(sum(w in ("liked", "cache") for w in where) / len(where), 3) if where else None,

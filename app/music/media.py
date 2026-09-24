@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app.config import settings
 from app.music import storage, youtube
+from app.music.library import library
 from app.music.models import Track
 
 logger = logging.getLogger("jarvis.media")
@@ -124,17 +125,43 @@ async def youtube_hls_segment(video_id: str, n: int) -> Response:
     raise HTTPException(502, "YouTube не отдал сегмент")
 
 
+_REF = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_AUDIO_TYPES = {".flac": "audio/flac", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".opus": "audio/ogg", ".webm": "audio/webm"}
+
+
+@router.get("/file/{ref}")
+async def track_file(ref: str) -> Response:
+    """Песня с диска (лайки или кэш) — любой источник: Яндекс, YouTube,
+    SoundCloud. FileResponse отдаёт Range — Safari перематывает."""
+    if not _REF.match(ref):
+        raise HTTPException(404)
+    path = storage.path_for(ref)
+    if path is None:
+        raise HTTPException(404)
+    return FileResponse(path, media_type=_AUDIO_TYPES.get(path.suffix))
+
+
 @router.get("/cover/{video_id}")
 async def cover(video_id: str) -> Response:
     """Обложка трека (превью YouTube) — через ядро и с кэшем на диске: так
     она с того же origin (цвет фона плеера берётся через canvas) и не зависит от
     доступности i.ytimg.com с телефона. Для песен YouTube Music это обложка альбома."""
-    if not _VIDEO_ID.match(video_id):
+    if not _REF.match(video_id):
         raise HTTPException(404)
     path = storage.cover_dir() / f"{video_id}.jpg"
     if not path.exists():
+        # Яндекс и SoundCloud — обложка из библиотеки (напрямую, без прокси);
+        # YouTube — превью видео через туннель.
+        # ym-12345678 — тоже 11 символов, как id видео: сначала префикс источника.
+        foreign = video_id.startswith(("ym-", "sc-")) or not _VIDEO_ID.match(video_id)
+        info = library.track(video_id) if foreign else None
+        if foreign and info is None:
+            raise HTTPException(404)
+        if info is not None and not info.cover:
+            raise HTTPException(404)
+        url = info.cover if info is not None else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
         try:
-            data = await youtube.fetch_bytes(f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+            data = await youtube.fetch_bytes(url, proxy=info is None)
         except Exception as exc:
             logger.warning("Нет обложки %s: %s", video_id, exc)
             raise HTTPException(404)

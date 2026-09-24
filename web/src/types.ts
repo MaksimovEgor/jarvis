@@ -42,9 +42,13 @@ export interface PlayerState {
   song?: string | null
   artist?: string | null
   cover?: string | null
+  // Превью YouTube 4:3 с полями — обрезать; у Яндекса обложка квадратная.
+  coverCrop?: boolean
   service?: string | null
-  codec?: string | null
-  bitrate?: number | null
+  // «FLAC · 24 бит / 44,1 кГц», «MP3 · 320 кбит/с» — по самому файлу.
+  quality?: string | null
+  // «нет в Яндексе» — играет с YouTube/SoundCloud, хотя Яндекс подключён.
+  note?: string | null
   upcoming?: UpcomingTrack[]
 }
 
@@ -53,6 +57,7 @@ export interface UpcomingTrack {
   song: string
   artist: string | null
   cover: string | null
+  coverCrop?: boolean
 }
 
 // То, что показывают мини-плеер и «Сейчас играет».
@@ -60,10 +65,20 @@ export interface TrackMeta {
   song: string
   artist: string | null
   cover: string | null
+  coverCrop: boolean
   service: string | null
-  codec: string | null
-  bitrate: number | null
+  quality: string | null
+  note: string | null
   upcoming: UpcomingTrack[]
+}
+
+// Настройки волны — как в «Моей волне» Яндекса (app/music/models.py:WaveSpec).
+export interface WaveSettings {
+  station: string
+  mood_energy: 'all' | 'active' | 'fun' | 'calm' | 'sad'
+  diversity: 'default' | 'favorite' | 'discover' | 'popular'
+  language: 'any' | 'russian' | 'not-russian' | 'without-words'
+  label: string
 }
 
 export type Rating = 1 | -1 | null
@@ -122,4 +137,13 @@ export interface TurnEvent {
 export interface TurnsEvent {
   type: 'turns'
   active: { id: string; text: string; tool: string | null; background: boolean }[]
+}
+
+export interface YandexStatus {
+  state: 'off' | 'pending' | 'on' | 'broken'
+  login: string | null
+  plus: boolean
+  code: string | null
+  url: string | null
+  expiresAt: number | null
 }

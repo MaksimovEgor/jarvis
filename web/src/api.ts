@@ -1,4 +1,4 @@
-import type { HiddenArtist, HistoryEntry, LibraryStorage, LibraryTrack, Mood, Rating } from './types'
+import type { HiddenArtist, HistoryEntry, LibraryStorage, LibraryTrack, Mood, Rating, WaveSettings, YandexStatus } from './types'
 
 // Озвучка ответа: куски забираются по одному (app/services/speech.py).
 export interface SpeechMore {
@@ -132,7 +132,10 @@ export async function unmuteArtist(artist: string): Promise<void> {
   await postJson('library/unmute', { artist })
 }
 
-export async function libraryPlay(mode: 'wave' | 'liked' | 'track', opts: { mood?: Mood; ref?: string } = {}): Promise<void> {
+export async function libraryPlay(
+  mode: 'wave' | 'liked' | 'track',
+  opts: { mood?: Mood; ref?: string; wave?: WaveSettings } = {},
+): Promise<void> {
   await postJson('library/play', { device: DEVICE_ID, mode, ...opts })
 }
 
@@ -148,6 +151,20 @@ export async function fetchHidden(): Promise<{ tracks: LibraryTrack[]; artists: 
 
 export async function fetchStorage(): Promise<LibraryStorage> {
   return getJson('library/storage')
+}
+
+export async function yandexStatus(): Promise<YandexStatus> {
+  return getJson('library/yandex/status')
+}
+
+export async function yandexConnect(): Promise<YandexStatus> {
+  const resp = await fetch('library/yandex/connect', { method: 'POST' })
+  if (!resp.ok) throw new Error(`Сервер ответил ${resp.status}`)
+  return resp.json() as Promise<YandexStatus>
+}
+
+export async function yandexDisconnect(): Promise<void> {
+  await postJson('library/yandex/disconnect', {})
 }
 
 async function getJson<T>(url: string): Promise<T> {

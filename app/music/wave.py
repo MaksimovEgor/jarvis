@@ -21,15 +21,15 @@ import logging
 import random
 import time
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Any, Literal
 
-from app.music import storage, taste, youtube
+from app.music import storage, taste, yandex, youtube
 from app.music.library import ArtistStats, TrackInfo, artist_key, library
-from app.music.models import Mood, Slot, Track, slot_at
+from app.music.models import Mood, Outcome, Slot, Track, WaveSpec, slot_at
 
 logger = logging.getLogger("jarvis.wave")
 
-Bucket = Literal["liked", "similar", "discover"]
+Bucket = Literal["yandex", "liked", "similar", "discover"]
 
 # Доли корзин (liked, similar, discover).
 BUCKETS: dict[Mood, tuple[float, float, float]] = {
@@ -40,6 +40,46 @@ BUCKETS: dict[Mood, tuple[float, float, float]] = {
     "sleep": (0.4, 0.5, 0.1),
     "discover": (0.1, 0.4, 0.5),
 }
+# С подключённым Яндексом: основа — его «Моя волна» (yandex, liked, similar, discover).
+BUCKETS_YANDEX: dict[Mood, tuple[float, float, float, float]] = {
+    "auto": (0.5, 0.25, 0.15, 0.1),
+    "energetic": (0.5, 0.25, 0.15, 0.1),
+    "calm": (0.5, 0.25, 0.15, 0.1),
+    "focus": (0.6, 0.2, 0.15, 0.05),
+    "sleep": (0.6, 0.25, 0.15, 0.0),
+    "discover": (0.6, 0.05, 0.1, 0.25),
+}
+
+# Наши настроения → настройки волны Яндекса (и обратно — для энергии без Яндекса).
+MOOD_PRESET: dict[Mood, WaveSpec] = {
+    "auto": WaveSpec(),
+    "energetic": WaveSpec(mood_energy="active", label="бодрое"),
+    "calm": WaveSpec(mood_energy="calm", label="спокойное"),
+    "focus": WaveSpec(station="activity:work-background", label="работаю"),
+    "sleep": WaveSpec(station="activity:fall-asleep", label="засыпаю"),
+    "discover": WaveSpec(diversity="discover", label="незнакомое"),
+}
+_ACTIVITY_MOOD: dict[str, Mood] = {
+    "wake-up": "energetic", "run": "energetic", "workout": "energetic", "party": "energetic",
+    "driving": "auto", "road-trip": "auto", "work-background": "focus", "study-background": "focus",
+    "fall-asleep": "sleep", "romantic-date": "calm", "beloved": "calm", "sex": "calm",
+}
+
+
+def spec_mood(spec: WaveSpec) -> Mood:
+    """Какой энергией вести нашу часть волны под эти настройки Яндекса."""
+    kind, _, tag = spec.station.partition(":")
+    if kind == "activity" and tag in _ACTIVITY_MOOD:
+        return _ACTIVITY_MOOD[tag]
+    if spec.mood_energy in ("active", "fun"):
+        return "energetic"
+    if spec.mood_energy in ("calm", "sad"):
+        return "calm"
+    if spec.diversity == "discover":
+        return "discover"
+    return "auto"
+
+
 # Допустимая энергия трека (1 — колыбельная, 5 — драйв).
 _SLOT_ENERGY: dict[Slot, tuple[int, int]] = {
     "morning": (3, 5), "day": (2, 5), "evening": (2, 4), "night": (1, 3),
@@ -58,6 +98,13 @@ COLD_START: dict[Mood, str] = {
     "auto": "Foo Fighters", "energetic": "rock hits energetic", "calm": "acoustic rock ballads",
     "focus": "instrumental post-rock", "sleep": "calm ambient piano", "discover": "new alternative rock",
 }
+
+
+def bucket_shares(values: tuple[float, ...]) -> dict[Bucket, float]:
+    """Доли по порядку корзин: 4 числа — с Яндексом, 3 — без."""
+    names: tuple[Bucket, ...] = ("yandex", "liked", "similar", "discover") if len(values) == 4 \
+        else ("liked", "similar", "discover")
+    return dict(zip(names, values))
 
 
 def energy_range(slot: Slot, mood: Mood) -> tuple[int, int]:
@@ -80,6 +127,8 @@ class Context:
     artists: dict[str, ArtistStats] = field(default_factory=dict)
     # Исполнители последних треков очереди — чтобы не шли подряд.
     recent_artists: list[str] = field(default_factory=list)
+    # Доли корзин; None — BUCKETS[mood] (без Яндекса).
+    shares: dict[Bucket, float] | None = None
 
 
 def weight(c: Candidate, ctx: Context) -> float:
@@ -110,8 +159,8 @@ def weight(c: Candidate, ctx: Context) -> float:
 def compose(pool: list[Candidate], ctx: Context, n: int, rng: random.Random) -> list[Track]:
     """n треков из пула: доли корзин по настроению, взвешенно, без повторов.
     Пустая корзина отдаёт свою долю другим."""
-    shares = dict(zip(("liked", "similar", "discover"), BUCKETS[ctx.mood]))
-    left: dict[Bucket, list[tuple[Candidate, float]]] = {"liked": [], "similar": [], "discover": []}
+    shares = ctx.shares or bucket_shares(BUCKETS[ctx.mood])
+    left: dict[Bucket, list[tuple[Candidate, float]]] = {"yandex": [], "liked": [], "similar": [], "discover": []}
     seen: set[str] = set()
     for c in pool:
         if c.track.ref in seen:
@@ -127,7 +176,7 @@ def compose(pool: list[Candidate], ctx: Context, n: int, rng: random.Random) -> 
         buckets = [b for b in left if left[b]]
         if not buckets:
             break
-        bucket = rng.choices(buckets, [shares[b] or 0.01 for b in buckets])[0]
+        bucket = rng.choices(buckets, [shares.get(b, 0) or 0.01 for b in buckets])[0]
         items = left[bucket]
         blocked = set(recent[-(ARTIST_GAP - 1):]) - {""}
         allowed = [i for i, (c, _) in enumerate(items) if artist_key(c.track.artist) not in blocked]
@@ -156,11 +205,31 @@ class Wave:
     """Источник очереди плеера. Держит, от чего уже строили «похожее»,
     чтобы следующие пачки не повторяли одно и то же радио."""
 
-    def __init__(self, device: str, mood: Mood = "auto", rng: random.Random | None = None) -> None:
+    def __init__(
+        self, device: str, mood: Mood = "auto", rng: random.Random | None = None,
+        spec: WaveSpec | None = None,
+    ) -> None:
         self.device = device
-        self.mood = mood
+        self.spec = spec or MOOD_PRESET[mood]
+        self.mood = mood if spec is None else spec_mood(spec)
         self._rng = rng or random.Random()
         self._used_seeds: set[str] = set()
+        self._cursor = yandex.WaveCursor(self.spec)
+
+    @property
+    def label(self) -> str:
+        return self.spec.label
+
+    @property
+    def yandex_only(self) -> bool:
+        """Конкретные настройки (грустное, русское, бег, 90-е) знает только
+        Яндекс: наши лайки и YouTube про язык и жанр ничего не знают."""
+        return yandex.is_on() and not self.spec.is_plain
+
+    def _shares(self) -> dict[Bucket, float] | None:
+        if self.yandex_only:
+            return {"yandex": 1.0}
+        return bucket_shares(BUCKETS_YANDEX[self.mood]) if yandex.is_on() else None
 
     @property
     def slot(self) -> Slot:
@@ -173,10 +242,14 @@ class Wave:
             recent=library.recent_refs(RECENT_HOURS) | {t.ref for t in queued},
             artists=library.artist_stats(),
             recent_artists=[t.artist or "" for t in queued[-ARTIST_GAP:]],
+            shares=self._shares(),
         )
 
     async def first(self) -> Track | None:
-        """Мгновенный старт: лайк, который уже лежит на диске."""
+        """Мгновенный старт: лайк, который уже лежит на диске (кроме волны с
+        настройками — её начинает Яндекс)."""
+        if self.yandex_only:
+            return None
         local = [i for i in library.liked(limit=500) if storage.where(i.ref) == "liked"]
         picked = compose([_candidate(i, "liked") for i in local], self._context([]), 1, self._rng)
         return picked[0] if picked else None
@@ -194,6 +267,10 @@ class Wave:
             similar_seeds = [COLD_START[self.mood]]
 
         jobs = []
+        if yandex.is_on():
+            jobs.append(self._yandex(n))
+        if self.yandex_only:
+            return await self._yandex_only(queued, n, jobs[0])
         # «Похожее»: радио YouTube Music от лайков и зёрен dj. Лайк здесь только
         # отправная точка, сам не играет — фильтр «недавно звучал» к нему не нужен.
         # Строгое настроение без разметки (старт волны): радио от лайка не знает
@@ -239,8 +316,27 @@ class Wave:
         self._used_seeds.update(picked)
         return picked
 
+    async def _yandex_only(self, queued: list[Track], n: int, job: Any) -> list[Track]:
+        try:
+            pool = await job
+        except Exception as exc:
+            logger.warning("Волна Яндекса не ответила: %s", exc)
+            return []
+        ctx = self._context(queued)
+        tracks = compose(pool, ctx, n, self._rng) or compose(pool, replace(ctx, recent=set()), n, self._rng)
+        return [replace(t, origin="wave") for t in tracks]
+
+    async def _yandex(self, n: int) -> list[Candidate]:
+        """«Моя волна» Яндекса (или станция занятия/жанра) — пачка ~5, берём две."""
+        found = await yandex.wave_tracks(self._cursor)
+        if len(found) < n:
+            found += await yandex.wave_tracks(self._cursor)
+        return [Candidate(t, "yandex") for t in found]
+
     async def _radio(self, ref: str) -> list[Candidate]:
-        return [Candidate(t, "similar") for t in await youtube.music_radio(ref)]
+        # Лайк из Яндекса — его станция «по треку», из YouTube — радио YT Music.
+        tracks = await yandex.similar(ref) if yandex.is_ref(ref) else await youtube.music_radio(ref)
+        return [Candidate(t, "similar") for t in tracks]
 
     async def _search(self, query: str) -> list[Candidate]:
         return [Candidate(t, "discover") for t in (await youtube.music_search(query))[:4]]
@@ -250,6 +346,17 @@ class Wave:
         if not found:
             return []
         return [Candidate(found[0], "similar")] + await self._radio(found[0].ref)
+
+    async def on_start(self, track: Track) -> None:
+        if track.source == "yandex" and yandex.is_on():
+            await yandex.feedback(self._cursor, "started", track.ref)
+
+    async def on_end(self, track: Track, outcome: Outcome, played: float) -> None:
+        """Яндекс учится: дослушал — finished, пропустил/дизлайк — skip."""
+        if track.source != "yandex" or not yandex.is_on() or outcome in ("error", "stalled"):
+            return
+        kind = "finished" if outcome in ("finished", "stopped") else "skip"
+        await yandex.feedback(self._cursor, kind, track.ref, played)
 
     def forget(self, ref: str) -> None:
         """После дизлайка — не строить от этого трека «похожее»."""

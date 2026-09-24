@@ -5,7 +5,9 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
-Source = Literal["youtube", "radio", "local"]
+Source = Literal["youtube", "radio", "local", "yandex", "soundcloud"]
+# Где найден трек — подпись в плеере и приоритет в sources.resolve.
+Service = Literal["yandex", "ytmusic", "youtube", "soundcloud"]
 # music — песни (очередь похожих, всегда с начала); audiobook/podcast —
 # длинное, продолжается с места остановки.
 Kind = Literal["music", "audiobook", "podcast"]
@@ -20,6 +22,30 @@ Origin = Literal["wave", "liked", "query", "mix", "radio", "local"]
 Outcome = Literal["finished", "skipped", "disliked", "error", "stalled", "stopped"]
 # Откуда звук: лайки на диске, кэш на диске, из интернета (качается), поток (длинное).
 FromWhere = Literal["liked", "cache", "net", "stream"]
+
+# Настройки волны — как у «Моей волны» Яндекса: станция (волна, занятие,
+# настроение-станция, эпоха, жанр) + настроение, характер, язык. Без Яндекса
+# те же настройки ведут нашу волну через энергию (mood).
+MoodEnergy = Literal["all", "active", "fun", "calm", "sad"]
+Diversity = Literal["default", "favorite", "discover", "popular"]
+Language = Literal["any", "russian", "not-russian", "without-words"]
+MY_WAVE = "user:onyourwave"
+
+
+@dataclass(frozen=True)
+class WaveSpec:
+    station: str = MY_WAVE
+    mood_energy: MoodEnergy = "all"
+    diversity: Diversity = "default"
+    language: Language = "any"
+    # Как назвать в плеере: «бег», «грустное · русское», «русский рок».
+    label: str = ""
+
+    @property
+    def is_plain(self) -> bool:
+        """Просто «Моя волна» без настроек — тогда её дополняют лайки и YouTube."""
+        return (self.station, self.mood_energy, self.diversity, self.language) == (MY_WAVE, "all", "default", "any")
+
 
 SLOT_RU: dict[Slot, str] = {"morning": "утро", "day": "день", "evening": "вечер", "night": "ночь"}
 MOOD_RU: dict[Mood, str] = {
@@ -83,8 +109,11 @@ class Track:
     # Исполнитель, если известен (YouTube: канал «X - Topic» или «X - Песня»).
     artist: str | None = None
     origin: Origin = "query"
-    # Откуда найден: поиск/радио YouTube Music или обычный YouTube.
-    service: Literal["youtube", "ytmusic"] = "youtube"
+    service: Service = "youtube"
+    # Страница трека (SoundCloud — yt-dlp качает по ней).
+    url: str | None = None
+    # Обложка у источника (Яндекс; у YouTube — превью по id).
+    cover: str | None = None
 
     @property
     def key(self) -> str:

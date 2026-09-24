@@ -8,6 +8,9 @@
     POST /library/unmute   — {artist}: снять все дизлайки исполнителя («Вернуть»)
     GET  /library/storage  — сколько заняли лайки и кэш из лимита
     GET  /library/stats    — метрика волны за days дней
+    POST /library/yandex/connect     — код устройства для ya.ru/device
+    GET  /library/yandex/status      — off | pending (код) | on (логин, Плюс) | broken
+    POST /library/yandex/disconnect  — забыть токен
 
 Снаружи — через Caddy (basic auth), как /player/*.
 """
@@ -20,9 +23,10 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.music import devices, storage
+from app.music import devices, storage, yandex
 from app.music.library import TrackInfo, library
-from app.music.models import Mood, Rating
+from app.music.models import Diversity, Language, Mood, MoodEnergy, Rating, WaveSpec
+from app.music.wave import MOOD_PRESET, spec_mood
 from app.music.web_player import _web_device
 
 router = APIRouter(prefix="/library")
@@ -40,11 +44,21 @@ class UnmuteRequest(BaseModel):
     artist: str
 
 
+class WaveSettings(BaseModel):
+    """Настройки волны с экрана — как в «Моей волне» Яндекса."""
+    station: str = "user:onyourwave"
+    mood_energy: MoodEnergy = "all"
+    diversity: Diversity = "default"
+    language: Language = "any"
+    label: str = ""
+
+
 class PlayRequest(BaseModel):
     device: str
     mode: Literal["wave", "liked", "track"]
     mood: Mood = "auto"
     ref: str | None = None
+    wave: WaveSettings | None = None
 
 
 def _out(info: TrackInfo) -> dict:
@@ -66,7 +80,8 @@ async def rate(req: RateRequest) -> dict:
 async def play(req: PlayRequest) -> dict:
     player = devices.player_for(_web_device(req.device))
     if req.mode == "wave":
-        text = await player.play_wave(req.mood)
+        spec = WaveSpec(**req.wave.model_dump()) if req.wave else MOOD_PRESET[req.mood]
+        text = await player.play_wave(spec_mood(spec), spec=spec)
     elif req.mode == "liked":
         text = await player.play_liked()
     else:
@@ -104,3 +119,36 @@ async def storage_usage() -> dict:
 @router.get("/stats")
 async def stats(days: int = 7) -> dict:
     return asdict(library.stats(days))
+
+
+def _yandex(status: yandex.Status) -> dict:
+    return {
+        "state": status.state, "login": status.login, "plus": status.plus,
+        "code": status.code, "url": status.url, "expiresAt": status.expires_at,
+    }
+
+
+@router.get("/yandex/status")
+async def yandex_status() -> dict:
+    return _yandex(yandex.status())
+
+
+@router.post("/yandex/connect")
+async def yandex_connect() -> dict:
+    return _yandex(await yandex.connect())
+
+
+@router.get("/yandex/stations")
+async def yandex_stations() -> dict:
+    """Станции «Моей волны» для чипов: занятия, настроения, эпохи, жанры."""
+    try:
+        catalog = await yandex.stations()
+    except Exception:
+        return {"stations": []}
+    return {"stations": [{"id": sid, "name": name} for sid, name in catalog.items()]}
+
+
+@router.post("/yandex/disconnect")
+async def yandex_disconnect() -> dict:
+    await yandex.disconnect()
+    return _yandex(yandex.status())

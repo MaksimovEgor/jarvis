@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     # Недоступен — тот же запрос уходит в LLM_*, а волна играет и без него.
     dj_hermes_url: str = "http://127.0.0.1:8643"
     dj_hermes_api_key: str = ""
+    # Яндекс Музыка (app/music/yandex.py): токен появляется после входа кодом
+    # устройства из «Моей музыки», поэтому в файле, а не в .env.
+    yandex_token_file: str = "data/yandex_token.json"
     radio_browser_url: str = "https://de1.api.radio-browser.info"
     # Адрес самого ядра для mpv: длинное с YouTube он берёт потоком из /media/yt.
     core_url: str = "http://127.0.0.1:8000"

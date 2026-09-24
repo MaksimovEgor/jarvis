@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Подключение Яндекса — макет</title>
+<style>
+  :root { --bg:#0b0f14; --surface:#161c24; --surface-2:#232b36; --border:#1f2731; --text:#e7ecf2; --dim:#8a96a3; --accent:#4fd1c5; --danger:#ff6369; --ya:#ffdb4d; }
+  * { box-sizing:border-box }
+  body { margin:0; background:#05070a; color:var(--text); font-family:-apple-system,system-ui,sans-serif; display:flex; flex-wrap:wrap; gap:32px; justify-content:center; padding:24px }
+  .col { display:flex; flex-direction:column; gap:10px; align-items:center }
+  .label { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.06em }
+  .phone { width:390px; border-radius:36px; border:1px solid #1d2530; overflow:hidden; background:var(--bg); padding-bottom:24px }
+  header { padding:18px 16px 12px; font-weight:600; border-bottom:1px solid var(--border) }
+  .card { margin:14px 16px; padding:16px; border-radius:18px; background:var(--surface); display:flex; gap:14px; align-items:flex-start }
+  .ym { flex:none; width:44px; height:44px; border-radius:12px; background:var(--ya); display:grid; place-items:center; color:#000; font-weight:800; font-size:20px }
+  .card h3 { margin:0 0 4px; font-size:16px }
+  .card p { margin:0 0 12px; color:var(--dim); font-size:13px; line-height:1.4 }
+  .btn { display:inline-block; padding:9px 16px; border-radius:18px; background:var(--ya); color:#000; font-weight:600; font-size:14px }
+  .code { font-size:32px; letter-spacing:.18em; font-weight:700; margin:6px 0 8px; font-variant-numeric:tabular-nums }
+  .link { color:var(--accent) }
+  .ok { color:var(--accent); font-size:13px }
+  .dim { color:var(--dim); font-size:12px }
+  .wave { margin:0 16px; padding:16px; border-radius:18px; background:linear-gradient(135deg,#1d3b3a,#232b36); color:var(--dim); font-size:13px }
+  .np { padding:18px 24px; text-align:center }
+  .np h1 { margin:0; font-size:22px } .np p { margin:4px 0 12px; color:#c7cfd8 }
+  .badge { display:inline-block; font-size:11px; padding:3px 8px; border-radius:8px; background:rgb(255 255 255 / 9%); color:#d6dde5; margin:2px }
+  .badge.ya { background:rgb(255 219 77 / 16%); color:var(--ya) }
+</style>
+</head>
+<body>
+<div class="col">
+  <span class="label">1 · Не подключено</span>
+  <div class="phone">
+    <header>← Моя музыка</header>
+    <div class="card">
+      <div class="ym">Я</div>
+      <div>
+        <h3>Яндекс Музыка</h3>
+        <p>Подключи Плюс — песни в 320 кбит/с и рекомендации «Моей волны» Яндекса. Чего нет в Яндексе — найду на YouTube.</p>
+        <span class="btn">Подключить</span>
+      </div>
+    </div>
+    <div class="wave">Моя волна · …</div>
+  </div>
+</div>
+
+<div class="col">
+  <span class="label">2 · Код устройства</span>
+  <div class="phone">
+    <header>← Моя музыка</header>
+    <div class="card">
+      <div class="ym">Я</div>
+      <div>
+        <h3>Введи код на ya.ru/device</h3>
+        <div class="code">KX4-9TQ</div>
+        <p>Открой <span class="link">ya.ru/device</span> на этом телефоне, войди в аккаунт с Плюсом и введи код. Жду подтверждения… <span class="dim">(код действует 5 минут)</span></p>
+        <span class="btn">Открыть ya.ru/device</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="col">
+  <span class="label">3 · Подключено + бейдж в плеере</span>
+  <div class="phone">
+    <header>← Моя музыка</header>
+    <div class="card">
+      <div class="ym">Я</div>
+      <div>
+        <h3>Яндекс Музыка подключена</h3>
+        <p class="ok">egor.maksimov · Плюс активен</p>
+        <p style="margin-top:6px">Лайки синхронизируются, волна учится на Яндексе.</p>
+        <span class="dim">Отключить</span>
+      </div>
+    </div>
+    <div class="np">
+      <h1>Группа крови</h1>
+      <p>Кино</p>
+      <span class="badge ya">Яндекс Музыка</span><span class="badge">MP3 · 320 кбит/с</span><span class="badge">из сети</span>
+      <p class="dim" style="margin-top:14px">…а для песни, которой нет в Яндексе:</p>
+      <span class="badge">YouTube Music</span><span class="badge">AAC · 128 кбит/с</span><span class="badge">нет в Яндексе</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

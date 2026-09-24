@@ -177,7 +177,9 @@ async def music_radio(seed_ref: str, limit: int = 25) -> list[Track]:
     return [t for t in tracks if t.ref != seed_ref and _fits(t)]
 
 
-async def _download(video_id: str, timeout: float) -> Path:
+async def _download(video_id: str, timeout: float, url: str | None = None) -> Path:
+    """video_id — имя файла в кэше (для SoundCloud «sc-<id>»), url — откуда
+    качать, если это не видео YouTube."""
     if path := storage.path_for(video_id):
         return path
     cache = storage.cache_dir()
@@ -187,8 +189,8 @@ async def _download(video_id: str, timeout: float) -> Path:
     out = await _run(
         "-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--no-progress",
         "--print", "after_move:%(artist)s\t%(channel)s\t%(duration)s\t%(title)s",
-        "-o", str(cache / "%(id)s.%(ext)s"),
-        f"https://www.youtube.com/watch?v={video_id}",
+        "-o", str(cache / f"{video_id}.%(ext)s"),
+        url or f"https://www.youtube.com/watch?v={video_id}",
         timeout=timeout,
     )
     _remember_meta(video_id, out)
@@ -220,14 +222,37 @@ async def download(track: Track, timeout: float = 180) -> Path:
     ждут одну и ту же загрузку."""
     task = _inflight.get(track.ref)
     if task is None:
-        task = asyncio.create_task(_download(track.ref, timeout))
+        task = asyncio.create_task(_download(track.ref, timeout, track.url))
         _inflight[track.ref] = task
         task.add_done_callback(lambda _: _inflight.pop(track.ref, None))
     return await asyncio.shield(task)
 
 
+async def soundcloud_search(query: str, limit: int = 3) -> list[Track]:
+    """SoundCloud — последний запасной источник (ремиксы, андеграунд)."""
+    out = await _run(
+        "--flat-playlist", "--playlist-end", str(limit),
+        "--print", "%(id)s\t%(duration)s\t%(uploader)s\t%(webpage_url)s\t%(title)s",
+        f"scsearch{limit}:{query}", timeout=MUSIC_TIMEOUT,
+    )
+    tracks = []
+    for line in out.splitlines():
+        sc_id, duration, uploader, url, title = (line.split("\t", 4) + ["", "", "", ""])[:5]
+        if not sc_id.isdigit() or not url.startswith("http"):
+            continue
+        try:
+            seconds: float | None = float(duration)
+        except ValueError:
+            seconds = None
+        track = Track(title=clean_title(title), source="soundcloud", ref=f"sc-{sc_id}", duration=seconds,
+                      artist=_artist(uploader, title), service="soundcloud", url=url)
+        if _fits(track):
+            tracks.append(track)
+    return tracks
+
+
 def cached(track: Track) -> Path | None:
-    return storage.path_for(track.ref) if track.source == "youtube" else None
+    return storage.path_for(track.ref) if track.source in ("youtube", "soundcloud") else None
 
 
 async def stream_url(video_id: str, refresh: bool = False) -> str:
@@ -240,8 +265,9 @@ async def stream_url(video_id: str, refresh: bool = False) -> str:
     return url
 
 
-async def fetch_bytes(url: str) -> bytes:
-    connector = ProxyConnector.from_url(settings.youtube_proxy, rdns=True) if settings.youtube_proxy else None
+async def fetch_bytes(url: str, proxy: bool = True) -> bytes:
+    use = proxy and settings.youtube_proxy
+    connector = ProxyConnector.from_url(settings.youtube_proxy, rdns=True) if use else None
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=15)) as session:
         async with session.get(url) as resp:
             resp.raise_for_status()

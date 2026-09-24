@@ -115,6 +115,13 @@ Hermes ─MCP─► devices.current_player() ◄──────────�
                                    браузер шлёт /player/report (позиция, конец трека)
 ```
 
+## Яндекс Музыка и другие источники
+
+`app/music/sources.py`: Яндекс (FLAC для лайков, MP3 320 для кэша, «Моя волна»
+со всеми настройками) → YouTube Music → YouTube → SoundCloud. Подключение —
+«Моя музыка» → «Подключить» → код на ya.ru/device. План и решения —
+`docs/plans/yandex-music/`, схема — `docs/architecture.html#sources`.
+
 ## Моя волна, лайки, профиль dj
 
 Полное описание — `docs/architecture.html#wave`, план и решения — `docs/plans/music-library/`.

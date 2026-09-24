@@ -97,3 +97,25 @@ def test_unmute_artist_clears_all_dislikes() -> None:
     library.rate("b", -1)
     assert library.unmute_artist("кино") == 2
     assert library.banned_refs() == set()
+
+
+def test_import_likes_does_not_override_dislike() -> None:
+    from app.music.models import Track
+
+    a = Track(title="A", source="yandex", ref="ym-1", service="yandex")
+    b = Track(title="B", source="yandex", ref="ym-2", service="yandex")
+    library.upsert(b)
+    library.rate("ym-2", -1)
+    assert library.import_likes([a, b]) == 1
+    assert library.rating("ym-1") == 1 and library.rating("ym-2") == -1
+    assert library.track("ym-1").track().source == "yandex"
+
+
+def test_stats_by_source() -> None:
+    from app.music.models import Track
+
+    pid = library.start_play(Track(title="A", source="yandex", ref="ym-1", service="yandex"), "web:x", None, "net", 1)
+    library.finish_play(pid, "finished", 100)
+    _play("yt1", "skipped")
+    stats = library.stats(7)
+    assert stats.by_source["ym"] == {"finished": 1} and stats.by_source["yt"] == {"skipped": 1}

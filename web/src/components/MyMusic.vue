@@ -3,25 +3,92 @@ import { computed, onMounted, ref } from 'vue'
 
 import { libraryPlay } from '../api'
 import { useLibrary } from '../composables/useLibrary'
-import type { LibraryTrack, Mood } from '../types'
+import type { LibraryTrack, WaveSettings } from '../types'
+import YandexCard from './YandexCard.vue'
 
 const emit = defineEmits<{
   close: []
   played: [text: string]
 }>()
 
-const MOODS: { id: Mood; label: string }[] = [
-  { id: 'auto', label: 'Под время суток' },
-  { id: 'energetic', label: 'Бодрое' },
-  { id: 'calm', label: 'Спокойное' },
-  { id: 'focus', label: 'Для работы' },
-  { id: 'sleep', label: 'Для сна' },
-  { id: 'discover', label: 'Незнакомое' },
+// Настройки как в «Моей волне» Яндекса. Занятие и эпоха — станции (одна на
+// выбор), настроение/характер/язык — поверх. Без Яндекса они ведут нашу волну.
+type Option<T extends string> = { id: T; label: string }
+const ACTIVITIES: Option<string>[] = [
+  { id: 'activity:wake-up', label: 'Просыпаюсь' },
+  { id: 'activity:work-background', label: 'Работаю' },
+  { id: 'activity:study-background', label: 'Концентрация' },
+  { id: 'activity:driving', label: 'За рулём' },
+  { id: 'activity:road-trip', label: 'В дороге' },
+  { id: 'activity:workout', label: 'Тренируюсь' },
+  { id: 'activity:run', label: 'Бег' },
+  { id: 'activity:party', label: 'Вечеринка' },
+  { id: 'activity:romantic-date', label: 'Свидание' },
+  { id: 'activity:beloved', label: 'Для влюблённых' },
+  { id: 'activity:fall-asleep', label: 'Засыпаю' },
 ]
+const MOODS: Option<WaveSettings['mood_energy']>[] = [
+  { id: 'active', label: 'Бодрое' },
+  { id: 'fun', label: 'Весёлое' },
+  { id: 'calm', label: 'Спокойное' },
+  { id: 'sad', label: 'Грустное' },
+]
+const CHARACTERS: Option<WaveSettings['diversity']>[] = [
+  { id: 'favorite', label: 'Любимое' },
+  { id: 'discover', label: 'Незнакомое' },
+  { id: 'popular', label: 'Популярное' },
+]
+const LANGUAGES: Option<WaveSettings['language']>[] = [
+  { id: 'russian', label: 'Русское' },
+  { id: 'not-russian', label: 'Иностранное' },
+  { id: 'without-words', label: 'Без слов' },
+]
+const EPOCHS: Option<string>[] = [
+  { id: 'epoch:the-greatest-hits', label: 'Вечные хиты' },
+  { id: 'epoch:seventies', label: '70-е' },
+  { id: 'epoch:eighties', label: '80-е' },
+  { id: 'epoch:nineties', label: '90-е' },
+  { id: 'epoch:zeroes', label: '2000-е' },
+  { id: 'epoch:tenths', label: '2010-е' },
+  { id: 'epoch:twenties', label: '2020-е' },
+]
+const GROUPS = [
+  { title: 'Занятие', key: 'station', options: ACTIVITIES },
+  { title: 'Настроение', key: 'mood_energy', options: MOODS },
+  { title: 'Характер', key: 'diversity', options: CHARACTERS },
+  { title: 'Язык', key: 'language', options: LANGUAGES },
+  { title: 'Эпоха', key: 'station', options: EPOCHS },
+] as const
+type GroupKey = (typeof GROUPS)[number]['key']
+const DEFAULTS: Record<GroupKey, string> = { station: 'user:onyourwave', mood_energy: 'all', diversity: 'default', language: 'any' }
 
 const library = useLibrary()
 const tab = ref<'likes' | 'hidden'>('likes')
-const mood = ref<Mood>('auto')
+const wave = ref<Record<GroupKey, string>>({ ...DEFAULTS })
+
+function isOn(key: GroupKey, id: string): boolean {
+  return wave.value[key] === id
+}
+
+// Повторный тап снимает выбор — как в Яндексе.
+function pick(key: GroupKey, id: string): void {
+  wave.value = { ...wave.value, [key]: isOn(key, id) ? DEFAULTS[key] : id }
+}
+
+function waveSettings(): WaveSettings {
+  const v = wave.value
+  return {
+    station: v.station,
+    mood_energy: MOODS.find((o) => o.id === v.mood_energy)?.id ?? 'all',
+    diversity: CHARACTERS.find((o) => o.id === v.diversity)?.id ?? 'default',
+    language: LANGUAGES.find((o) => o.id === v.language)?.id ?? 'any',
+    label: waveLabel.value,
+  }
+}
+
+const waveLabel = computed(() =>
+  GROUPS.flatMap((g) => g.options.filter((o) => isOn(g.key, o.id)).map((o) => o.label.toLowerCase())).join(' · '),
+)
 const starting = ref(false)
 let searchTimer: number | null = null
 
@@ -69,7 +136,7 @@ function subtitle(track: LibraryTrack): string {
 async function play(mode: 'wave' | 'liked' | 'track', ref?: string): Promise<void> {
   starting.value = true
   try {
-    await libraryPlay(mode, { mood: mood.value, ref })
+    await libraryPlay(mode, mode === 'wave' ? { wave: waveSettings() } : { ref })
     emit('played', mode === 'wave' ? 'Включаю волну' : 'Включаю')
     emit('close')
   } catch {
@@ -97,22 +164,26 @@ onMounted(() => void library.refresh())
     </header>
 
     <div class="lib__scroll">
+      <YandexCard />
       <div class="wave">
         <h2 class="wave__title">Моя волна</h2>
         <p class="wave__hint">{{ moment }}</p>
         <button class="wave__play" :disabled="starting" @click="play('wave')">
           {{ starting ? 'Подбираю…' : '▶ Слушать' }}
         </button>
-        <div class="wave__moods">
-          <button
-            v-for="m in MOODS"
-            :key="m.id"
-            class="wave__mood"
-            :class="{ 'wave__mood--on': mood === m.id }"
-            @click="mood = m.id"
-          >
-            {{ m.label }}
-          </button>
+        <div v-for="group in GROUPS" :key="group.title" class="wave__group">
+          <span class="wave__group-title">{{ group.title }}</span>
+          <div class="wave__moods">
+            <button
+              v-for="o in group.options"
+              :key="o.id"
+              class="wave__mood"
+              :class="{ 'wave__mood--on': isOn(group.key, o.id) }"
+              @click="pick(group.key, o.id)"
+            >
+              {{ o.label }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -348,10 +419,22 @@ onMounted(() => void library.refresh())
     }
   }
 
+  &__group {
+    margin-top: 12px;
+  }
+
+  &__group-title {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
   &__moods {
     display: flex;
     gap: 8px;
-    margin-top: 14px;
     overflow-x: auto;
     scrollbar-width: none;
   }

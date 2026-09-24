@@ -33,9 +33,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.config import settings
-from app.music import positions, radio, storage, taste, youtube
+from app.music import positions, radio, sources, storage, taste, yandex, youtube
 from app.music.library import artist_key, library
-from app.music.models import MOOD_RU, SLOT_RU, FromWhere, Kind, Mood, Outcome, Rating, Track, split_title
+from app.music.models import MOOD_RU, SLOT_RU, FromWhere, Kind, Mood, Outcome, Rating, Track, WaveSpec, split_title
 from app.music.outputs import Output
 from app.music.wave import AHEAD, REFILL_BELOW, Wave
 
@@ -64,27 +64,30 @@ def _clock(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-_SERVICE = {"ytmusic": "YouTube Music", "youtube": "YouTube"}
 UPCOMING_SHOWN = 3
 
 
 def _display(track: Track) -> dict[str, Any]:
-    """Что показать о треке на экране: песня и исполнитель раздельно, обложка, источник."""
-    if track.source != "youtube":
-        return {"song": track.title, "artist": None, "cover": None,
-                "service": "Радио" if track.source == "radio" else "Файл"}
+    """Что показать о треке на экране: песня и исполнитель раздельно, обложка,
+    источник. coverCrop — превью YouTube 4:3 с полями (фронт обрежет), у
+    Яндекса и SoundCloud обложка квадратная."""
+    if track.source in ("radio", "local") or (track.source == "youtube" and track.is_long and track.kind != "music"):
+        cover = f"media/cover/{track.ref}" if track.source == "youtube" else None
+        return {"song": track.title, "artist": None, "cover": cover, "coverCrop": True,
+                "service": {"radio": "Радио", "local": "Файл"}.get(track.source, "YouTube"), "note": None}
     artist = track.artist or youtube.meta(track.ref)[0]
     if artist is None and (info := library.track(track.ref)) is not None:
         artist = info.artist
     song, artist = split_title(track.title, artist)
+    note = "нет в Яндексе" if yandex.is_on() and track.source != "yandex" and track.origin == "query" else None
     return {"song": song, "artist": artist, "cover": f"media/cover/{track.ref}",
-            "service": _SERVICE[track.service]}
+            "coverCrop": track.source == "youtube", "service": sources.SERVICE_LABEL[track.service], "note": note}
 
 
 def _journaled(track: Track) -> bool:
-    """В журнал и оценки — только песни с YouTube: у радио и файлов нет id,
-    а книги оценивать бессмысленно."""
-    return track.source == "youtube" and not track.is_long
+    """В журнал и оценки — только песни: у радио и файлов нет id, книги
+    оценивать бессмысленно."""
+    return sources.is_song(track)
 
 
 class Player:
@@ -136,7 +139,7 @@ class Player:
 
     def _origin_label(self, track: Track) -> str | None:
         if track.origin == "wave" and self.wave is not None:
-            return f"волна · {MOOD_RU[self.wave.mood] or SLOT_RU[self.wave.slot]}"
+            return f"волна · {self.wave.label or MOOD_RU[self.wave.mood] or SLOT_RU[self.wave.slot]}"
         if track.origin == "liked":
             return "мои лайки"
         return None
@@ -151,6 +154,8 @@ class Player:
         except Exception:
             self._play_id = None
             logger.exception("Не записал прослушивание")
+        if self.wave is not None and track.origin == "wave":
+            asyncio.create_task(self.wave.on_start(track))
 
     async def _close_play(self, outcome: Outcome | None = None) -> None:
         """outcome=None — решить по позиции: пропуск или дослушал."""
@@ -167,6 +172,8 @@ class Player:
             library.finish_play(play_id, outcome, round(listened, 1))
         except Exception:
             logger.exception("Не записал исход прослушивания")
+        if self.wave is not None and track.origin == "wave":
+            asyncio.create_task(self.wave.on_end(track, outcome, listened))
 
     def _record_failed(self, track: Track) -> None:
         try:
@@ -183,12 +190,14 @@ class Player:
         for i in range(index, min(index + MAX_SKIPS, len(self._queue))):
             track = self._queue[i]
             where: FromWhere | None = None
-            if track.source == "youtube":
-                where = storage.where(track.ref) if not track.is_long else "stream"
+            if sources.is_song(track):
+                where = storage.where(track.ref)
+            elif track.source == "youtube":
+                where = "stream"  # длинное с YouTube — потоком
             started = time.monotonic()
             try:
                 if track.origin == "wave" and where == "net":
-                    await youtube.download(track, timeout=WAVE_DOWNLOAD_TIMEOUT)
+                    await sources.download(track, timeout=WAVE_DOWNLOAD_TIMEOUT)
                 await self.output.load(track, positions.start_for(track), paused=self._duck_active)
             except Exception as exc:
                 logger.warning("Пропускаю «%s»: %s", track.title, exc)
@@ -203,7 +212,7 @@ class Player:
                 "rating": library.rating(track.ref) if _journaled(track) else None,
                 "origin": self._origin_label(track),
                 "from": where,
-                "codec": None, "bitrate": None,
+                "quality": None,
                 **_display(track),
                 "upcoming": self._upcoming_meta(),
             })
@@ -254,7 +263,7 @@ class Player:
 
     async def _extend_with_mix(self, seed: Track, generation: int) -> None:
         try:
-            tracks = self._playable(await youtube.mix(seed))
+            tracks = self._playable(await sources.similar(seed))
         except Exception:
             logger.exception("Не получилось получить микс для «%s»", seed.title)
             return
@@ -292,13 +301,15 @@ class Player:
 
     # --- включение --------------------------------------------------------
 
-    async def play_youtube(self, query: str, kind: Kind = "music") -> str:
+    async def play_query(self, query: str, kind: Kind = "music") -> str:
+        """Песня/исполнитель по запросу: Яндекс, чего нет — YouTube, SoundCloud
+        (sources.resolve); дальше похожие того же источника."""
         async with self._lock:
-            candidates = await youtube.search(query, kind)
+            candidates = await sources.resolve(query, kind)
             if kind == "music":
                 candidates = self._playable(candidates)
             if not candidates:
-                return f"На YouTube ничего не нашлось по запросу «{query}»."
+                return f"Нигде ничего не нашлось по запросу «{query}»."
             self.wave = None
             # Первый, что загрузится (_play_index пропускает недоступные);
             # остальные кандидаты в очереди не нужны — дальше пойдёт микс.
@@ -311,9 +322,14 @@ class Player:
         start = positions.start_for(track)
         return f"Включаю: {track.title}" + (f", продолжаю с {_clock(start)}." if start else ".")
 
-    async def play_wave(self, mood: Mood = "auto") -> str:
-        wave = Wave(self.device, mood)
-        taste.refresh_seeds_soon(wave.slot, mood)
+    # Старое имя: MCP-инструмент и тесты зовут play_youtube.
+    play_youtube = play_query
+
+    async def play_wave(self, mood: Mood = "auto", spec: WaveSpec | None = None) -> str:
+        """mood — наше настроение; spec — полные настройки волны Яндекса
+        (станция занятия/жанра/эпохи, настроение, характер, язык)."""
+        wave = Wave(self.device, mood, spec=spec)
+        taste.refresh_seeds_soon(wave.slot, wave.mood)
         async with self._lock:
             first = await wave.first()
             tracks = [first] if first else await wave.more([], REFILL_BELOW, tag=False)
@@ -325,7 +341,8 @@ class Player:
             except RuntimeError:
                 self.wave = None
                 return "Не получилось включить волну — треки не загрузились."
-        what = f" — {MOOD_RU[mood]}" if MOOD_RU[mood] else ""
+        label = wave.label or MOOD_RU[wave.mood]
+        what = f" — {label}" if label else ""
         return f"Включаю твою волну{what}: {track.title}."
 
     async def play_liked(self, query: str | None = None) -> str:
@@ -417,9 +434,11 @@ class Player:
         if is_current:
             self.output.set_meta({"rating": value})
 
+        asyncio.create_task(yandex.set_like(ref, value, before))
         if value == 1:
-            if not storage.pin(ref):
-                asyncio.create_task(self._pin_later(target or Track(title=ref, source="youtube", ref=ref)))
+            track = target or (info.track() if (info := library.track(ref)) else None)
+            if track is not None:
+                asyncio.create_task(self._save_liked(track))
             taste.tag_soon(ref)
             return "Сохранил в «Мою музыку»."
         if before == 1:
@@ -448,13 +467,15 @@ class Player:
         storage.drop(ref)
         return "Понял, больше не включу."
 
-    async def _pin_later(self, track: Track) -> None:
-        """Лайк трека, которого ещё нет на диске (длинный поток, не докачался)."""
+    async def _save_liked(self, track: Track) -> None:
+        """Лайк → файл навсегда в liked/ (Яндекс — в FLAC, если отдаст)."""
         try:
-            await youtube.download(track)
-            storage.pin(track.ref)
+            await sources.save_liked(track)
         except Exception:
             logger.exception("Не сохранил лайкнутый «%s»", track.title)
+            return
+        if self.current is not None and self.current.ref == track.ref:
+            self.output.set_meta({"from": "liked"})
 
     # --- управление -------------------------------------------------------
 
@@ -545,7 +566,11 @@ class Player:
         return f"{state}: {track.title}.{liked}{wave} В очереди ещё {left}."
 
     def _upcoming_meta(self) -> list[dict[str, Any]]:
-        return [{"ref": t.ref, **_display(t)} for t in self._queue[self._pos + 1:self._pos + 1 + UPCOMING_SHOWN]]
+        upcoming = self._queue[self._pos + 1:self._pos + 1 + UPCOMING_SHOWN]
+        for track in upcoming:
+            if track.cover:
+                library.upsert(track)  # обложку Яндекса /media/cover берёт из библиотеки
+        return [{"ref": t.ref, **_display(t)} for t in upcoming]
 
     def _publish_upcoming(self) -> None:
         if self.current is not None:
@@ -553,12 +578,12 @@ class Player:
 
     async def _publish_audio_info(self, track: Track) -> None:
         try:
-            info = await storage.audio_info(track.ref)
+            quality = await storage.quality(track.ref)
         except Exception:
             logger.exception("ffprobe не ответил про «%s»", track.title)
             return
-        if info and self.current is track:
-            self.output.set_meta({"codec": info[0], "bitrate": info[1]})
+        if quality and self.current is track:
+            self.output.set_meta({"quality": quality})
 
     def upcoming(self, limit: int = 5) -> list[str]:
         return [t.title for t in self._queue[self._pos + 1:self._pos + 1 + limit]]
@@ -606,5 +631,5 @@ class Player:
             "ducked": self._duck_active,
             "volume": await self.output.volume(),
             "upcoming": self.upcoming(),
-            "wave": self.wave.mood if self.wave else None,
+            "wave": (self.wave.label or self.wave.mood) if self.wave else None,
         }

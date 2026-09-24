@@ -42,7 +42,7 @@ const subtitle = computed(() => {
     aria-label="Плеер, открыть «Сейчас играет»"
     @click="emit('open')"
   >
-    <CoverArt class="mini__cover" :src="meta.cover" :live="live" />
+    <CoverArt class="mini__cover" :src="meta.cover" :crop="meta.coverCrop" :live="live" />
     <div class="mini__info">
       <p class="mini__title">{{ meta.song }}</p>
       <p class="mini__sub">{{ subtitle }}</p>

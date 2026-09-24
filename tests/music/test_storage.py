@@ -67,3 +67,12 @@ def test_usage(music_env: Path) -> None:
     _file(storage.cache_dir(), "c", 1)
     usage = storage.usage()
     assert (usage.liked_mb, usage.cache_mb, usage.limit_mb) == (2.0, 1.0, 10)
+
+
+def test_flac_from_yandex_is_found_and_counted(music_env: Path) -> None:
+    # Регрессия: .flac не было в AUDIO_EXTS — FLAC-лайк Яндекса «не существовал».
+    path = _file(storage.liked_dir(), "ym-1", 2)
+    flac = path.rename(path.with_suffix(".flac"))
+    assert storage.path_for("ym-1") == flac
+    assert storage.where("ym-1") == "liked"
+    assert storage.usage().liked_mb == 2.0

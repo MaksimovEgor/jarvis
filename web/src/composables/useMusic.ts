@@ -129,9 +129,10 @@ export function useMusic(
           song: state.song ?? state.title,
           artist: state.artist ?? null,
           cover: state.cover ?? null,
+          coverCrop: state.coverCrop ?? true,
           service: state.service ?? null,
-          codec: state.codec ?? null,
-          bitrate: state.bitrate ?? null,
+          quality: state.quality ?? null,
+          note: state.note ?? null,
           upcoming: state.upcoming ?? [],
         }
       : null

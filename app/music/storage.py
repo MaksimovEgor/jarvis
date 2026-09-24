@@ -22,7 +22,7 @@ from app.music.models import FromWhere
 
 logger = logging.getLogger("jarvis.storage")
 
-AUDIO_EXTS = (".m4a", ".webm", ".opus", ".mp3")
+AUDIO_EXTS = (".m4a", ".webm", ".opus", ".mp3", ".flac")
 MB = 1024 * 1024
 
 
@@ -119,28 +119,40 @@ def prune(keep: Path | None = None) -> None:
             path.unlink(missing_ok=True)
 
 
-_audio_info: dict[str, tuple[str, int | None]] = {}
-_CODECS = {"aac": "AAC", "opus": "Opus", "mp3": "MP3", "vorbis": "Vorbis", "flac": "FLAC"}
+_quality: dict[str, str] = {}
+_CODECS = {"aac": "AAC", "opus": "Opus", "mp3": "MP3", "vorbis": "Vorbis", "flac": "FLAC", "alac": "ALAC"}
 
 
-async def audio_info(ref: str) -> tuple[str, int | None] | None:
-    """(кодек, кбит/с) файла на диске — для плеера. ffprobe, результат в памяти."""
-    if ref in _audio_info:
-        return _audio_info[ref]
+async def quality(ref: str) -> str | None:
+    """«FLAC · 16 бит / 44,1 кГц», «MP3 · 320 кбит/с» — по самому файлу (ffprobe),
+    результат в памяти. None — файла на диске нет."""
     path = path_for(ref)
     if path is None:
         return None
+    key = f"{ref}:{path.suffix}"
+    if key in _quality:
+        return _quality[key]
     proc = await asyncio.create_subprocess_exec(
         "ffprobe", "-v", "error", "-select_streams", "a:0",
-        "-show_entries", "stream=codec_name,bit_rate", "-of", "json", str(path),
+        "-show_entries", "stream=codec_name,bit_rate,sample_rate,bits_per_raw_sample,bits_per_sample:format=bit_rate",
+        "-of", "json", str(path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     out, _ = await asyncio.wait_for(proc.communicate(), 10)
-    stream = (json.loads(out or b"{}").get("streams") or [{}])[0]
+    data = json.loads(out or b"{}")
+    stream = (data.get("streams") or [{}])[0]
     codec = _CODECS.get(stream.get("codec_name", ""), (stream.get("codec_name") or "?").upper())
-    rate = int(stream["bit_rate"]) // 1000 if str(stream.get("bit_rate", "")).isdigit() else None
-    _audio_info[ref] = (codec, rate)
-    return _audio_info[ref]
+    if codec in ("FLAC", "ALAC"):
+        bits = next((int(v) for v in (stream.get("bits_per_raw_sample"), stream.get("bits_per_sample"))
+                     if str(v or "").isdigit() and int(v) > 0), None)
+        rate = int(stream.get("sample_rate") or 0) / 1000
+        label = f"{codec} · {bits or '?'} бит / {rate:g} кГц".replace(".", ",")
+    else:
+        raw = stream.get("bit_rate") or (data.get("format") or {}).get("bit_rate")
+        kbps = int(raw) // 1000 if str(raw or "").isdigit() else None
+        label = f"{codec} · {kbps} кбит/с" if kbps else codec
+    _quality[key] = label
+    return label
 
 
 def cover_dir() -> Path:

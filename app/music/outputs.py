@@ -23,7 +23,7 @@ from collections import deque
 from typing import Any, Awaitable, Callable
 
 from app.config import settings
-from app.music import media, youtube
+from app.music import media, sources
 from app.music.models import Track
 from app.music.mpv import MPV
 
@@ -99,12 +99,12 @@ class MpvOutput(Output):
         await self._ended(msg["reason"])
 
     async def _target(self, track: Track) -> str:
-        if track.source != "youtube":
-            return track.ref
-        if track.is_long:
+        if track.source == "youtube" and track.is_long:
             # Часы звука не качаем целиком — поток через прокси ядра.
             return f"{settings.core_url}/media/yt/{track.ref}"
-        return str(await youtube.download(track))
+        if sources.is_song(track):
+            return str(await sources.download(track))
+        return track.ref
 
     async def load(self, track: Track, start: float, paused: bool) -> None:
         target = await self._target(track)
@@ -145,8 +145,8 @@ class MpvOutput(Output):
         return metadata.get("icy-title")
 
     def prefetch(self, track: Track) -> None:
-        if track.source == "youtube" and not track.is_long:
-            task = asyncio.create_task(youtube.download(track))
+        if sources.is_song(track):
+            task = asyncio.create_task(sources.download(track))
             task.add_done_callback(lambda t: t.cancelled() or t.exception())  # ошибку увидим при проигрывании
 
 
@@ -281,13 +281,13 @@ class WebOutput(Output):
     # --- Output ------------------------------------------------------------
 
     async def _src(self, track: Track) -> str:
-        if track.source == "youtube":
-            if track.is_long:
-                return f"media/hls/{track.ref}/index.m3u8" if self._hls else f"media/yt/{track.ref}"
-            # Короткое — сначала в кэш (~3с): исправленный yt-dlp файл
-            # играет и iPhone, а сырой поток YouTube (DASH) — нет.
-            await youtube.download(track)
-            return f"media/yt/{track.ref}"
+        if track.source == "youtube" and track.is_long:
+            return f"media/hls/{track.ref}/index.m3u8" if self._hls else f"media/yt/{track.ref}"
+        if sources.is_song(track):
+            # Песня — сначала на диск (~1-3 с): исправленный yt-dlp файл или
+            # MP3/FLAC Яндекса iPhone играет, а сырой поток YouTube (DASH) — нет.
+            await sources.download(track)
+            return f"media/file/{track.ref}"
         if track.source == "radio" and track.ref.startswith("https://"):
             return track.ref
         # http-радио страница по https не откроет (mixed content), локальные
@@ -299,7 +299,7 @@ class WebOutput(Output):
             "seq": self._state["seq"] + 1, "src": await self._src(track), "title": track.title,
             "start": start, "paused": paused, "live": track.source == "radio",
             # Оценить можно только трек с YouTube — у радио и файлов нет id.
-            "ref": track.ref if track.source == "youtube" else None, "rating": None,
+            "ref": track.ref if sources.is_song(track) else None, "rating": None,
         }
         self._reported_position, self._reported_at = start, time.time()
         self._progress_at = time.time()
@@ -381,6 +381,6 @@ class WebOutput(Output):
         return self._volume
 
     def prefetch(self, track: Track) -> None:
-        if track.source == "youtube" and not track.is_long:
-            task = asyncio.create_task(youtube.download(track))
+        if sources.is_song(track):
+            task = asyncio.create_task(sources.download(track))
             task.add_done_callback(lambda t: t.cancelled() or t.exception())

@@ -18,15 +18,16 @@ import re
 import time
 from dataclasses import dataclass
 
-from app.music import devices
-from app.music.models import Kind, Mood
+from app.music import devices, wave_spec, yandex
+from app.music.models import Kind
+from app.music.wave import spec_mood
 from app.timers import timers
 
 
 logger = logging.getLogger("jarvis.router")
 
 # Ответы плеера «ничего не нашёл» — тогда пусть попробует Hermes.
-_NOT_FOUND = ("Не нашёл", "На YouTube ничего")
+_NOT_FOUND = ("Не нашёл", "На YouTube ничего", "Нигде ничего")
 
 
 @dataclass
@@ -55,17 +56,6 @@ _DISLIKE = re.compile(
 _LIKED = re.compile(
     rf"^{_PLAY_VERB}{_POLITE}\s+(?:мою\s+музыку|мои\s+лайки|лайки|лайкнут\w*(?:\s+(?:песни|треки))?|"
     r"(?:мо[июе]\s+)?любим\w*(?:\s+(?:музыку|песни|треки))?|избранн\w*)$"
-)
-# «Включи музыку», «включи мою волну», «что-нибудь бодрое», «музыку для сна».
-_WAVE_BARE = {"музыку", "волну", "мою волну", "что-нибудь", "что нибудь", "какую-нибудь музыку", "музыку какую-нибудь"}
-_WAVE_HEAD = re.compile(r"^(?:мою\s+волну|волну|что[- ]нибудь|какую[- ]нибудь\s+музыку|музыку|песни)\s+(.+)$")
-_WAVE_TAIL = re.compile(r"^(.+?)\s+(?:музыку|песни|волну)$")
-_MOODS: tuple[tuple[Mood, re.Pattern[str]], ...] = (
-    ("sleep", re.compile(r"для\s+сна|перед\s+сном|на\s+ночь|чтобы\s+(?:за)?снуть|колыбельн")),
-    ("focus", re.compile(r"для\s+(?:работы|учебы|концентрации|фона)|фонов\w*|сосредоточ")),
-    ("energetic", re.compile(r"бодр|энергичн|весел|драйв|зажигательн|для\s+(?:спорта|тренировки|пробежки)")),
-    ("calm", re.compile(r"спокойн|расслаб|релакс|лиричн|медленн|тих\w*")),
-    ("discover", re.compile(r"\bнов|незнаком|свеж")),
 )
 _RESUME_BOOK = re.compile(r"^(?:продолжи|продолжай|давай\s+дальше)\s+(?:слушать\s+)?(?:аудио)?книгу$")
 _TIMER = re.compile(r"^(?:поставь\s+|заведи\s+|засеки\s+)?таймер\s+на\s+(.+)$")
@@ -130,14 +120,16 @@ def _duration(spec: str) -> float | None:
     return total or None
 
 
-def _wave_mood(query: str) -> Mood | None:
-    """Настроение волны по хвосту «включи …»; None — это не волна, а поиск."""
-    if query in _WAVE_BARE:
-        return "auto"
-    m = _WAVE_HEAD.match(query) or _WAVE_TAIL.match(query)
-    if not m:
-        return None
-    return next((mood for mood, pattern in _MOODS if pattern.search(m.group(1))), None)
+async def _stations() -> dict[str, str]:
+    """Каталог станций Яндекса (жанры, эпохи…) — только когда Яндекс подключён:
+    без него «включи рок» остаётся поиском, как раньше."""
+    if not yandex.is_on():
+        return {}
+    try:
+        return await yandex.stations()
+    except Exception:
+        logger.warning("Нет каталога станций Яндекса", exc_info=True)
+        return {}
 
 
 def _clock(seconds: float) -> str:
@@ -207,14 +199,14 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
 
     if m := _PLAY.match(t):
         query = m.group(1).strip()
-        if (mood := _wave_mood(query)) is not None:
-            return FastReply(await player.play_wave(mood), "play_wave")
+        if (spec := wave_spec.parse(query, await _stations())) is not None:
+            return FastReply(await player.play_wave(spec_mood(spec), spec=spec), "play_wave")
         if _NOT_MEDIA.match(query) or _NEEDS_AGENT.search(query) or len(query) < 2:
             return None
         kind: Kind = "audiobook" if _BOOK.search(query) else "podcast" if _PODCAST.search(query) else "music"
         if kind == "audiobook":
             query = _BOOK.sub(" ", query).strip() or query
-        reply = await player.play_youtube(query, kind)
+        reply = await player.play_query(query, kind)
         return None if reply.startswith(_NOT_FOUND) else FastReply(reply, "play_music")
 
     return None

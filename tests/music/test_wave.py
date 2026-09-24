@@ -117,3 +117,16 @@ def test_split_title() -> None:
     assert split_title("In The End - Linkin Park", "Linkin Park") == ("In The End", "Linkin Park")
     assert split_title("Кино - Кукушка", None) == ("Кукушка", "Кино")
     assert split_title("Everlong", "Foo Fighters") == ("Everlong", "Foo Fighters")
+
+
+def test_compose_yandex_bucket_share() -> None:
+    from app.music.wave import BUCKETS_YANDEX, bucket_shares
+
+    pool = [Candidate(yt(f"ya{i}", f"ya-artist{i}"), "yandex") for i in range(30)] + _pool()
+    rng = random.Random(7)
+    counts: Counter[str] = Counter()
+    for _ in range(500):
+        ctx = Context("day", "auto", shares=bucket_shares(BUCKETS_YANDEX["auto"]))
+        for track in compose(pool, ctx, 10, rng):
+            counts["ya" if track.ref.startswith("ya") else "other"] += 1
+    assert abs(counts["ya"] / sum(counts.values()) - 0.5) < 0.05

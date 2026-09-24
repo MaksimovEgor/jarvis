@@ -39,8 +39,10 @@ const progress = computed(() => (props.duration ? Math.min(1, props.position / p
 const badges = computed(() => {
   const list: string[] = []
   if (props.meta.service) list.push(props.meta.service)
-  if (props.meta.codec) list.push(props.meta.bitrate ? `${props.meta.codec} · ${props.meta.bitrate} кбит/с` : props.meta.codec)
-  if (props.from) list.push(FROM_LABEL[props.from])
+  if (props.meta.quality) list.push(props.meta.quality)
+  // «♥ в «Моей музыке»» уже сказано отдельным бейджем.
+  if (props.from && !(props.from === 'liked' && props.rating === 1)) list.push(FROM_LABEL[props.from])
+  if (props.meta.note) list.push(props.meta.note)
   return list
 })
 
@@ -104,7 +106,7 @@ function onTouchEnd(): void {
       </button>
     </header>
 
-    <CoverArt class="np__cover" :src="meta.cover" :live="live" />
+    <CoverArt class="np__cover" :src="meta.cover" :crop="meta.coverCrop" :live="live" />
 
     <div class="np__meta">
       <button v-if="rateable" class="np__round" aria-label="Не нравится" @click="emit('dislike')">
@@ -171,7 +173,7 @@ function onTouchEnd(): void {
     <div v-if="meta.upcoming.length" class="np__next">
       <b>{{ origin?.startsWith('волна') ? 'Дальше в волне' : 'Дальше' }}</b>
       <div v-for="t in meta.upcoming" :key="t.ref" class="np__row">
-        <CoverArt class="np__thumb" :src="t.cover" />
+        <CoverArt class="np__thumb" :src="t.cover" :crop="t.coverCrop ?? true" />
         <span class="np__row-text">
           {{ t.song }}<small v-if="t.artist"> · {{ t.artist }}</small>
         </span>
@@ -207,6 +209,12 @@ function onTouchEnd(): void {
     background: var(--tint) center / cover;
     filter: blur(60px) saturate(1.4);
     opacity: 0.55;
+  }
+
+  // Колонка без прокрутки: блоки не сжимаются (иначе бейджи налезают на
+  // полосу прогресса) — место уступает только «Дальше», его строки прячутся.
+  & > * {
+    flex-shrink: 0;
   }
 
   &::before {
@@ -440,7 +448,9 @@ function onTouchEnd(): void {
   }
 
   &__next {
-    flex: none;
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow: hidden;
     margin-top: auto;
     padding: 12px 14px;
     border-radius: 14px;
@@ -473,19 +483,19 @@ function onTouchEnd(): void {
   }
 
   // Не влезает — меньше строк, но без прокрутки.
-  @media (max-height: 820px) {
+  @media (max-height: 900px) {
     &__row:nth-of-type(n + 3) {
       display: none;
     }
   }
 
-  @media (max-height: 740px) {
+  @media (max-height: 790px) {
     &__row:nth-of-type(n + 2) {
       display: none;
     }
   }
 
-  @media (max-height: 660px) {
+  @media (max-height: 700px) {
     &__next {
       display: none;
     }

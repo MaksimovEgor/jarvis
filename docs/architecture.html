@@ -200,6 +200,7 @@
     <a href="#parallel">Параллельно и отмена</a>
     <a href="#player">Плеер</a>
     <a href="#wave">Моя волна и вкус</a>
+    <a href="#sources">Источники: Яндекс, YouTube, SoundCloud</a>
     <a href="#voice">Озвучка</a>
     <a href="#timers">Таймеры и объявления</a>
     <a href="#delivery">Доставка и обрывы</a>
@@ -586,6 +587,31 @@ flowchart TD
     </section>
 
     <!-- ============================================================ -->
+    <section id="sources">
+      <h2>Источники: Яндекс Музыка → YouTube → SoundCloud</h2>
+      <p class="sub">Плеер и волна не знают, откуда трек: всё через <code>sources.py</code>. Яндекс — основной (качество и его «Моя волна»), чего в нём нет — YouTube Music, YouTube, SoundCloud.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart TD
+  Q["«включи Кино Группа крови»"] --> R["sources.resolve: Яндекс ‖ YT Music параллельно"]
+  R --> S{"совпадение ≥ 0.8?<br/>(слова запроса в «исполнитель + название»,<br/>штраф за cover/live/remix)"}
+  S -- "да" --> P["лучший: (совпадение, Яндекс > YTM > YT > SC)"]
+  S -- "нет" --> YT["+ YouTube"] --> S2{"≥ 0.8?"}
+  S2 -- "нет" --> SC["+ SoundCloud (yt-dlp scsearch)"] --> P
+  S2 -- "да" --> P
+  P --> D["sources.download: Яндекс — MP3 320 в cache/;<br/>лайк — FLAC (get-file-info, подпись, AES-CTR, ремукс ffmpeg) в liked/"]
+  D --> F["/media/file/&lt;ref&gt; → &lt;audio&gt;"]
+  W["play_wave(spec)"] --> RS["rotor/session/new: seeds = станция + settingMoodEnergy/Diversity/Language"]
+  RS --> WQ["очередь; фидбек trackStarted / trackFinished / skip"]
+      </pre></div>
+      <div class="grid2">
+        <div class="note"><h3>Вход в Яндекс</h3><p>Код устройства (ya.ru/device) из карточки в «Моей музыке». Токен — <code>data/yandex_token.json</code> (600). Сломался — <code>broken</code>, всё играет с YouTube. Лайки Яндекса импортируются при входе и раз в сутки; оценки из Джарвиса ставятся и в Яндексе.</p></div>
+        <div class="note"><h3>Волна с настройками</h3><p>Станции: <code>user:onyourwave</code>, занятия <code>activity:*</code> (12), эпохи <code>epoch:*</code>, жанры <code>genre:*</code> (161), настроения <code>mood:*</code>. Настройки: настроение (бодрое/весёлое/спокойное/грустное), характер (любимое/незнакомое/популярное), язык (русский/иностранный/без слов). С настройками волну ведёт только Яндекс; «просто волна» — Яндекс 50 % + лайки 25 % + YT Music 15 % + dj 10 %. Старый API rotor/station/*/settings3 отвечает 415 — используется сессионный.</p></div>
+        <div class="note"><h3>Качество и место</h3><p>Кэш — MP3 320 (~9 МБ), лайки — FLAC 24 бит / 44,1 кГц (~45 МБ). Не вышел FLAC — MP3 320. Качество в плеере — по самому файлу (<code>ffprobe</code>). Ref: <code>ym-&lt;id&gt;</code>, <code>sc-&lt;id&gt;</code>, YouTube — id видео (11 символов; <code>ym-12345678</code> тоже 11 — проверять префикс первым).</p></div>
+        <div class="note"><h3>Вход в веб</h3><p><code>app/web_auth.py</code>: страница <code>/login</code>, cookie <code>jarvis_auth</code> на год с продлением, bcrypt-хэш в <code>WEB_AUTH_HASH</code>. Basic auth в Caddy убран — PWA на iPhone его окно не показывала (чёрный экран).</p></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
     <section id="voice">
       <h2>Озвучка ответа</h2>
       <div class="diagram"><pre class="mermaid">
@@ -700,6 +726,9 @@ sequenceDiagram
           <tr><td class="m">POST /player/report, /player/control</td><td>браузер</td><td>Отчёт плеера, кнопки</td></tr>
           <tr><td class="m">POST /library/rate, /library/play, /library/unmute</td><td>браузер</td><td>Лайк/дизлайк, запуск волны/лайков/трека, «Вернуть» исполнителя</td></tr>
           <tr><td class="m">GET /library/likes, hidden, storage, stats</td><td>браузер, человек</td><td>«Моя музыка», место, метрика волны</td></tr>
+          <tr><td class="m">GET /media/file/{ref}</td><td>&lt;audio&gt;</td><td>Песня с диска любого источника (Range)</td></tr>
+          <tr><td class="m">/library/yandex/connect, status, disconnect, stations</td><td>браузер</td><td>Вход в Яндекс кодом устройства, каталог станций</td></tr>
+          <tr><td class="m">GET /login, POST /login</td><td>браузер</td><td>Вход снаружи, cookie на год</td></tr>
           <tr><td class="m">GET /media/cover/{id}</td><td>&lt;img&gt;</td><td>Обложка трека, кэш на диске</td></tr>
           <tr><td class="m">GET /media/yt, /media/hls, /media/ref</td><td>&lt;audio&gt;, mpv</td><td>Звук через ядро</td></tr>
           <tr><td class="m">/push/key, /push/subscribe, /push/unsubscribe</td><td>браузер</td><td>Web Push</td></tr>
@@ -720,6 +749,7 @@ sequenceDiagram
           <tr><td class="m">data/music/liked</td><td>Лайкнутые треки, навсегда</td></tr>
           <tr><td class="m">data/music/cache</td><td>Прочие скачанные треки, LRU в пределах 10 ГБ минус лайки</td></tr>
           <tr><td class="m">data/music/library.db</td><td>SQLite: треки (исполнитель, энергия, теги), оценки, журнал прослушиваний, заметки, зёрна dj</td></tr>
+          <tr><td class="m">data/yandex_token.json, data/web_secret</td><td>Токен Яндекс Музыки; ключ подписи cookie входа</td></tr>
           <tr><td class="m">~/.hermes/profiles/dj</td><td>Профиль Hermes «dj»: SOUL, память о вкусе, ключ API</td></tr>
           <tr><td class="m">в памяти ядра</td><td>Ходы, плееры, «чей ход», разговоры Hermes, куски озвучки, журнал событий SSE — пропадают при рестарте</td></tr>
         </tbody>

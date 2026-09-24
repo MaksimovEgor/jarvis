@@ -12,7 +12,7 @@ DEVICE = "web:router-test-01"
 def calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
     mocks = {
         name: AsyncMock(return_value="ок")
-        for name in ("play_wave", "play_liked", "play_youtube", "rate")
+        for name in ("play_wave", "play_liked", "play_query", "rate")
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(Player, name, mock)
@@ -28,6 +28,8 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
     ("включи музыку для работы", "focus"),
     ("включи что-нибудь для сна", "sleep"),
     ("включи что-нибудь новенькое", "discover"),
+    ("включи музыку для бега", "energetic"),
+    ("поставь что-нибудь грустное на русском", "calm"),
 ])
 async def test_wave_phrases(calls: dict[str, AsyncMock], text: str, mood: str) -> None:
     reply = await router.try_fast(text, DEVICE)
@@ -58,3 +60,9 @@ async def test_search_still_youtube(calls: dict[str, AsyncMock], text: str) -> N
     reply = await router.try_fast(text, DEVICE)
     assert reply is not None and reply.tool == "play_music"
     calls["play_wave"].assert_not_awaited()
+
+
+async def test_wave_spec_passed_to_player(calls: dict[str, AsyncMock]) -> None:
+    await router.try_fast("поставь что-нибудь грустное на русском", DEVICE)
+    spec = calls["play_wave"].await_args.kwargs["spec"]
+    assert (spec.mood_energy, spec.language) == ("sad", "russian")

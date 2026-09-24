@@ -22,7 +22,7 @@ from app.agent import conflicts, router
 from app.agent.orchestrator import run_agent
 from app.config import settings
 from app.mcp_server import mcp
-from app.music import devices, library_api, media, taste, web_player
+from app.music import devices, library_api, media, taste, web_player, yandex
 from app.schemas import (
     AudioChatResponse, AudioMore, CancelRequest, ClientLog, PushSubscribeRequest, PushUnsubscribeRequest,
     TextChatRequest, TextChatResponse,
@@ -45,6 +45,8 @@ _mcp_app = mcp.streamable_http_app()
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     timers.start()
+    await yandex.start()
+    likes_sync = asyncio.create_task(yandex.sync_likes_daily())
     # Раз в сутки профиль dj разбирает прослушанное и размечает лайки.
     digest = asyncio.create_task(taste.run_digest_daily())
     asyncio.create_task(tts.warmup())
@@ -53,6 +55,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with _mcp_app.router.lifespan_context(_mcp_app):
         yield
     digest.cancel()
+    likes_sync.cancel()
 
 
 app = FastAPI(title="Jarvis", lifespan=_lifespan)

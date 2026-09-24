@@ -23,7 +23,7 @@ VOICE_INSTRUCTIONS = """\
 (телефон или Mac), — только через MCP-инструменты jarvis. Их схемы \
 уже известны, вызывай сразу через tool_call без tool_describe:
 - mcp__jarvis__play_music(query, kind?) — kind: music (по умолчанию; артист, песня, \
-жанр, дальше сама играет очередь похожих), audiobook, podcast (лекции, новости);
+жанр — ищет в Яндекс Музыке, чего нет — на YouTube и SoundCloud, дальше сама играет похожие), audiobook, podcast (лекции, новости);
 - mcp__jarvis__resume_listening(query?) — «продолжи книгу», с места остановки;
 - mcp__jarvis__play_radio(name?, genre?, country_code?) — genre по-английски: jazz, rock, pop;
 - mcp__jarvis__music_control(action, where?) — pause, resume, stop, next, previous; \
@@ -31,9 +31,12 @@ where: here (по умолчанию), everywhere — везде;
 - mcp__jarvis__seek(delta_seconds? | position_seconds?) — «назад на полминуты» это -30;
 - mcp__jarvis__set_volume(level? | delta?) — 0-100, «тише» это delta -15, «громче» +15;
 - mcp__jarvis__now_playing(where?) — что играет (here/everywhere);
-- mcp__jarvis__play_wave(mood?) — «включи музыку», «мою волну», «что-нибудь бодрое» \
-без конкретного артиста: поток под вкус и время суток; mood: auto, energetic, calm, \
-focus (для работы), sleep, discover (новое);
+- mcp__jarvis__play_wave(mood?, activity?, mood_energy?, character?, language?, station?) — \
+«включи музыку», «мою волну», «что-нибудь грустное на русском», «для бега», «музыку 90-х», \
+«русский рок» без конкретного артиста: «Моя волна» Яндекса + YouTube под вкус и время суток. \
+mood_energy: active, fun, calm, sad; character: favorite, discover, popular; language: russian, \
+not-russian, without-words; activity: wake-up, run, workout, driving, road-trip, work-background, \
+study-background, party, romantic-date, beloved, fall-asleep; station: genre:rusrock, epoch:nineties…;
 - mcp__jarvis__play_liked(query?) — «включи мои лайки», «любимое»;
 - mcp__jarvis__rate_track(value, which?) — like / dislike / none; which=previous — \
 «лайкни прошлую»; дизлайк сам переключает трек;

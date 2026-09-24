@@ -18,3 +18,5 @@ cryptography
 PyJWT
 # Вход в веб снаружи (app/web_auth.py): тот же bcrypt-хэш, что был в Caddy
 bcrypt
+# Яндекс Музыка (app/music/yandex.py): неофициальный клиент MarshalX
+yandex-music>=3,<4
