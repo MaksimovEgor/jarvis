@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 
 import { clientLog, playerControl, playerEventsUrl, playerReport, rateTrack, type PlayerReport } from '../api'
-import type { FromWhere, PlayerEvent, PlayerState, Rating, TurnEvent, TurnsEvent } from '../types'
+import type { FromWhere, PlayerEvent, PlayerState, Rating, TrackMeta, TurnEvent, TurnsEvent } from '../types'
 import { SILENCE } from './usePlayer'
 
 const REPORT_EVERY_MS = 10_000
@@ -37,8 +37,11 @@ export function useMusic(
   const duration = ref(0)
   const trackRef = ref<string | null>(null)
   const rating = ref<Rating>(null)
+  // iOS не дал включить звук без касания — ждём тап, сторож ядра не трогает трек.
+  const blocked = ref(false)
   const origin = ref<string | null>(null)
   const from = ref<FromWhere | null>(null)
+  const meta = ref<TrackMeta | null>(null)
 
   const audio = new Audio()
   audio.preload = 'auto'
@@ -82,10 +85,22 @@ export function useMusic(
   function apply(): void {
     if (!hasTrack.value) return
     if (wantPlaying.value && held === 0) {
-      audio.play().catch(() => (isPlaying.value = false))
+      audio
+        .play()
+        .then(() => setBlocked(false))
+        .catch((e: unknown) => {
+          isPlaying.value = false
+          if (e instanceof DOMException && e.name === 'NotAllowedError') setBlocked(true)
+        })
     } else {
       pauseSelf()
     }
+  }
+
+  function setBlocked(value: boolean): void {
+    if (blocked.value === value) return
+    blocked.value = value
+    void playerReport({ seq, blocked: value })
   }
 
   function onState(state: PlayerState): void {
@@ -109,6 +124,17 @@ export function useMusic(
     rating.value = state.rating ?? null
     origin.value = state.origin ?? null
     from.value = state.from ?? null
+    meta.value = state.title
+      ? {
+          song: state.song ?? state.title,
+          artist: state.artist ?? null,
+          cover: state.cover ?? null,
+          service: state.service ?? null,
+          codec: state.codec ?? null,
+          bitrate: state.bitrate ?? null,
+          upcoming: state.upcoming ?? [],
+        }
+      : null
     wantPlaying.value = !state.paused && state.src !== null
     updateSession()
     apply()
@@ -241,8 +267,13 @@ export function useMusic(
 
   function updateSession(): void {
     if (!('mediaSession' in navigator)) return
+    const m = meta.value
     navigator.mediaSession.metadata = title.value
-      ? new MediaMetadata({ title: title.value, artist: 'Джарвис' })
+      ? new MediaMetadata({
+          title: m?.song ?? title.value,
+          artist: m?.artist ?? 'Джарвис',
+          artwork: m?.cover ? [{ src: new URL(m.cover, location.href).href, sizes: '480x360', type: 'image/jpeg' }] : [],
+        })
       : null
     navigator.mediaSession.playbackState = !hasTrack.value ? 'none' : wantPlaying.value ? 'playing' : 'paused'
   }
@@ -286,6 +317,7 @@ export function useMusic(
       .then(() => {
         unlocked = true
         if (!hadSrc || !wantPlaying.value || held > 0) pauseSelf()
+        else setBlocked(false)
       })
       .catch(() => undefined)
       .finally(() => {
@@ -321,6 +353,11 @@ export function useMusic(
     apply()
     updateSession()
     void playerControl('resume').catch(() => undefined)
+  }
+
+  // Повторить play() внутри жеста пользователя (после блокировки iOS).
+  function retry(): void {
+    apply()
   }
 
   function toggle(): void {
@@ -398,10 +435,13 @@ export function useMusic(
     rating,
     origin,
     from,
+    meta,
+    blocked,
     like,
     dislike,
     unrate,
     unlock,
+    retry,
     hold,
     release,
     toggle,
@@ -409,5 +449,6 @@ export function useMusic(
     previous,
     stop,
     seek,
+    seekBy,
   }
 }

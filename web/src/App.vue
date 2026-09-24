@@ -5,6 +5,7 @@ import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, type S
 import BackgroundTasks from './components/BackgroundTasks.vue'
 import ChatLog from './components/ChatLog.vue'
 import MyMusic from './components/MyMusic.vue'
+import NowPlaying from './components/NowPlaying.vue'
 import PlayerBar from './components/PlayerBar.vue'
 import RateToast from './components/RateToast.vue'
 import TalkButton from './components/TalkButton.vue'
@@ -33,10 +34,17 @@ const {
   rating: musicRating,
   origin: musicOrigin,
   from: musicFrom,
+  meta: musicMeta,
 } = music
 
 // «Моя музыка» — экран поверх чата; всплывашка после оценки с «Отменить».
 const showLibrary = ref(false)
+const showNowPlaying = ref(false)
+
+function onStop(): void {
+  showNowPlaying.value = false
+  music.stop()
+}
 const toast = ref<{ text: string; undoRef: string | null } | null>(null)
 let toastTimer: number | null = null
 
@@ -308,6 +316,17 @@ function unlockAudio(): void {
   earcon.unlock()
 }
 
+// Не только микрофон: «Слушать» в «Моей музыке», ♡, ▶ — любое касание экрана.
+// Звук, который iOS заблокировал, запускается прямо в этом жесте.
+document.addEventListener(
+  'pointerdown',
+  () => {
+    unlockAudio()
+    if (music.blocked.value) music.retry()
+  },
+  { capture: true },
+)
+
 function onWakeToggle(): void {
   unlockAudio()
   wake.setEnabled(wake.blocked.value || !wake.enabled.value)
@@ -436,9 +455,14 @@ function errorText(e: unknown): string {
       </button>
     </header>
 
+
+    <BackgroundTasks :tasks="backgroundTasks" @cancel="onCancel" />
+
+    <ChatLog :messages="messages" @cancel="onCancel" />
+
     <PlayerBar
-      v-if="musicTitle !== null"
-      :title="musicTitle"
+      v-if="musicMeta"
+      :meta="musicMeta"
       :playing="musicPlaying"
       :loading="musicLoading"
       :live="musicLive"
@@ -447,19 +471,11 @@ function errorText(e: unknown): string {
       :rateable="musicRef !== null"
       :rating="musicRating"
       :origin="musicOrigin"
-      :from="musicFrom"
+      @open="showNowPlaying = true"
       @toggle="music.toggle"
       @next="music.next"
-      @previous="music.previous"
-      @stop="music.stop"
-      @seek="music.seek"
       @like="onLike"
-      @dislike="onDislike"
     />
-
-    <BackgroundTasks :tasks="backgroundTasks" @cancel="onCancel" />
-
-    <ChatLog :messages="messages" @cancel="onCancel" />
 
     <footer class="app__footer">
       <form class="app__form" @submit.prevent="onSubmit">
@@ -474,7 +490,30 @@ function errorText(e: unknown): string {
       </form>
     </footer>
 
+    <NowPlaying
+      v-if="showNowPlaying && musicMeta"
+      :meta="musicMeta"
+      :playing="musicPlaying"
+      :loading="musicLoading"
+      :live="musicLive"
+      :position="musicPosition"
+      :duration="musicDuration"
+      :rateable="musicRef !== null"
+      :rating="musicRating"
+      :origin="musicOrigin"
+      :from="musicFrom"
+      @close="showNowPlaying = false"
+      @toggle="music.toggle"
+      @next="music.next"
+      @previous="music.previous"
+      @stop="onStop"
+      @seek="music.seek"
+      @seek-by="music.seekBy"
+      @like="onLike"
+      @dislike="onDislike"
+    />
     <MyMusic v-if="showLibrary" @close="showLibrary = false" @played="(text) => showToast(text)" />
+    <RateToast v-if="music.blocked.value && !toast" text="Коснись экрана, чтобы включить звук" :undo="false" />
     <RateToast v-if="toast" :text="toast.text" :undo="toast.undoRef !== null" @undo="onUndo" />
   </main>
 </template>

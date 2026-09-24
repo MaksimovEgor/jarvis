@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import shutil
 from dataclasses import dataclass
@@ -115,6 +117,34 @@ def prune(keep: Path | None = None) -> None:
         if path != keep:
             total -= path.stat().st_size
             path.unlink(missing_ok=True)
+
+
+_audio_info: dict[str, tuple[str, int | None]] = {}
+_CODECS = {"aac": "AAC", "opus": "Opus", "mp3": "MP3", "vorbis": "Vorbis", "flac": "FLAC"}
+
+
+async def audio_info(ref: str) -> tuple[str, int | None] | None:
+    """(кодек, кбит/с) файла на диске — для плеера. ffprobe, результат в памяти."""
+    if ref in _audio_info:
+        return _audio_info[ref]
+    path = path_for(ref)
+    if path is None:
+        return None
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name,bit_rate", "-of", "json", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await asyncio.wait_for(proc.communicate(), 10)
+    stream = (json.loads(out or b"{}").get("streams") or [{}])[0]
+    codec = _CODECS.get(stream.get("codec_name", ""), (stream.get("codec_name") or "?").upper())
+    rate = int(stream["bit_rate"]) // 1000 if str(stream.get("bit_rate", "")).isdigit() else None
+    _audio_info[ref] = (codec, rate)
+    return _audio_info[ref]
+
+
+def cover_dir() -> Path:
+    return Path(settings.music_cache_dir).parent / "covers"
 
 
 def usage() -> Usage:

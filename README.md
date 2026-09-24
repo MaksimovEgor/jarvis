@@ -157,10 +157,14 @@ Hermes ─MCP─► devices.current_player() ◄──────────�
 
 ```
 iPhone/Mac ─https─► Caddy на point ─► 127.0.0.1:<порт> ─ssh -R (jarvis-tunnel)─► asus
-  :8446 Jarvis  (basic auth Caddy)         18000 ─────────────────────► 127.0.0.1:8000
+  :8446 Jarvis  (вход — app/web_auth.py)   18000 ─────────────────────► 127.0.0.1:8000
   :8447 Hermes  (логин самого Hermes)      19119 ─────────────────────► 127.0.0.1:9119
 ```
 
+- Вход в Jarvis — страница `/login` самого ядра и cookie `jarvis_auth` на год
+  (продлевается при заходах). Пароль — bcrypt-хэш в `.env` (`WEB_AUTH_HASH`,
+  тот же, что раньше был в basic auth Caddy). Basic auth в Caddy убран:
+  PWA «На экран Домой» его окно не показывала — был чёрный экран.
 - Дашборд Hermes слушает только loopback: drop-in
   `scripts/systemd/hermes-dashboard.service.d/public.conf` (копируется в
   `~/.config/systemd/user/hermes-dashboard.service.d/`). В `~/.hermes/config.yaml`

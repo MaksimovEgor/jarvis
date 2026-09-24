@@ -179,6 +179,9 @@ class WebOutput(Output):
         self._progress_at = time.time()
         self._watchdog: asyncio.Task[None] | None = None
         self._held = False
+        self._blocked = False
+        # Трек реально пошёл (позиция хоть раз выросла) — только такой может «зависнуть».
+        self._started = False
 
     # --- связь с браузером ------------------------------------------------
 
@@ -247,6 +250,9 @@ class WebOutput(Output):
             self._hls = bool(data["hls"])
         if data.get("visible") is not None:
             self._visible = bool(data["visible"])
+        if data.get("blocked") is not None:
+            self._blocked = bool(data["blocked"])
+            self._progress_at = time.time()
         if data.get("held") is not None:
             self._held = bool(data["held"])
             self._progress_at = time.time()
@@ -256,6 +262,7 @@ class WebOutput(Output):
             position = float(data["position"])
             if self._reported_position is None or position > self._reported_position + 0.5:
                 self._progress_at = time.time()
+                self._started = True
             self._reported_position = position
             self._reported_at = time.time()
         if "paused" in data:
@@ -296,6 +303,7 @@ class WebOutput(Output):
         }
         self._reported_position, self._reported_at = start, time.time()
         self._progress_at = time.time()
+        self._started = False
         if self._watchdog is None:
             self._watchdog = asyncio.create_task(self._watch_stall())
         self._push(self.snapshot())
@@ -313,7 +321,9 @@ class WebOutput(Output):
             if state["src"] is None or state["paused"] or state.get("live") or not self.watching:
                 self._progress_at = time.time()
                 continue
-            if self._held or self._busy():
+            # Не стартовал вовсе — блокировка iOS или загрузка: это решает браузер
+            # (report stalled/blocked), сервер переключать не должен.
+            if not self._started or self._held or self._blocked or self._busy():
                 self._progress_at = time.time()
                 continue
             if time.time() - self._progress_at > self.STALL_SECONDS:

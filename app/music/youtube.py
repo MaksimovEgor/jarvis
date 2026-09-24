@@ -27,6 +27,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote_plus
 
 import aiohttp
@@ -108,7 +109,10 @@ def _artist(channel: str, title: str) -> str | None:
     return clean or None
 
 
-async def _list(url: str, limit: int, kind: Kind = "music", timeout: float = 60) -> list[Track]:
+async def _list(
+    url: str, limit: int, kind: Kind = "music", timeout: float = 60,
+    service: Literal["youtube", "ytmusic"] = "youtube",
+) -> list[Track]:
     out = await _run(
         "--flat-playlist", "--playlist-end", str(limit),
         "--print", "%(id)s\t%(duration)s\t%(channel)s\t%(title)s", url,
@@ -127,7 +131,7 @@ async def _list(url: str, limit: int, kind: Kind = "music", timeout: float = 60)
             title = clean_title(title)
         tracks.append(Track(
             title=title, source="youtube", ref=video_id, duration=seconds, kind=kind,
-            artist=_artist(channel, title) if kind == "music" else None,
+            artist=_artist(channel, title) if kind == "music" else None, service=service,
         ))
     return tracks
 
@@ -163,13 +167,13 @@ async def music_search(query: str, limit: int = 8) -> list[Track]:
     """Песни YouTube Music. У выдачи нет исполнителя и длительности — они
     появятся при скачивании (meta)."""
     url = f"https://music.youtube.com/search?q={quote_plus(query)}#songs"
-    return [t for t in await _list(url, limit, timeout=MUSIC_TIMEOUT) if _fits(t)]
+    return [t for t in await _list(url, limit, timeout=MUSIC_TIMEOUT, service="ytmusic") if _fits(t)]
 
 
 async def music_radio(seed_ref: str, limit: int = 25) -> list[Track]:
     """Радио YouTube Music по треку — «похожее» для волны (seed исключён)."""
     url = f"https://music.youtube.com/watch?v={seed_ref}&list=RDAMVM{seed_ref}"
-    tracks = await _list(url, limit, timeout=MUSIC_TIMEOUT)
+    tracks = await _list(url, limit, timeout=MUSIC_TIMEOUT, service="ytmusic")
     return [t for t in tracks if t.ref != seed_ref and _fits(t)]
 
 
@@ -234,6 +238,14 @@ async def stream_url(video_id: str, refresh: bool = False) -> str:
         url = out.strip().splitlines()[0]
         _stream_urls[video_id] = (url, time.time())
     return url
+
+
+async def fetch_bytes(url: str) -> bytes:
+    connector = ProxyConnector.from_url(settings.youtube_proxy, rdns=True) if settings.youtube_proxy else None
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            return await resp.read()
 
 
 async def _fetch_text(url: str) -> str:

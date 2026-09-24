@@ -39,6 +39,20 @@ def clean_title(title: str) -> str:
     return _TITLE_NOISE.sub("", title).strip() or title
 
 
+def split_title(title: str, artist: str | None) -> tuple[str, str | None]:
+    """(песня, исполнитель) для экрана: «Foo Fighters - Everlong» → Everlong,
+    Foo Fighters; «In The End - Linkin Park» у Linkin Park → In The End."""
+    if " - " in title:
+        left, right = (part.strip() for part in title.split(" - ", 1))
+        if artist and left.casefold() == artist.casefold():
+            return right, artist
+        if artist and right.casefold() == artist.casefold():
+            return left, artist
+        if not artist:
+            return right, left
+    return title, artist
+
+
 def slot_at(ts: float) -> Slot:
     """06–11 утро, 11–17 день, 17–23 вечер, 23–06 ночь (местное время)."""
     hour = time.localtime(ts).tm_hour
@@ -69,6 +83,8 @@ class Track:
     # Исполнитель, если известен (YouTube: канал «X - Topic» или «X - Песня»).
     artist: str | None = None
     origin: Origin = "query"
+    # Откуда найден: поиск/радио YouTube Music или обычный YouTube.
+    service: Literal["youtube", "ytmusic"] = "youtube"
 
     @property
     def key(self) -> str:

@@ -35,7 +35,7 @@ from typing import Any, Literal
 from app.config import settings
 from app.music import positions, radio, storage, taste, youtube
 from app.music.library import artist_key, library
-from app.music.models import MOOD_RU, SLOT_RU, FromWhere, Kind, Mood, Outcome, Rating, Track
+from app.music.models import MOOD_RU, SLOT_RU, FromWhere, Kind, Mood, Outcome, Rating, Track, split_title
 from app.music.outputs import Output
 from app.music.wave import AHEAD, REFILL_BELOW, Wave
 
@@ -62,6 +62,23 @@ def _clock(seconds: float) -> str:
     seconds = int(seconds)
     h, m, s = seconds // 3600, seconds // 60 % 60, seconds % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+_SERVICE = {"ytmusic": "YouTube Music", "youtube": "YouTube"}
+UPCOMING_SHOWN = 3
+
+
+def _display(track: Track) -> dict[str, Any]:
+    """Что показать о треке на экране: песня и исполнитель раздельно, обложка, источник."""
+    if track.source != "youtube":
+        return {"song": track.title, "artist": None, "cover": None,
+                "service": "Радио" if track.source == "radio" else "Файл"}
+    artist = track.artist or youtube.meta(track.ref)[0]
+    if artist is None and (info := library.track(track.ref)) is not None:
+        artist = info.artist
+    song, artist = split_title(track.title, artist)
+    return {"song": song, "artist": artist, "cover": f"media/cover/{track.ref}",
+            "service": _SERVICE[track.service]}
 
 
 def _journaled(track: Track) -> bool:
@@ -186,7 +203,12 @@ class Player:
                 "rating": library.rating(track.ref) if _journaled(track) else None,
                 "origin": self._origin_label(track),
                 "from": where,
+                "codec": None, "bitrate": None,
+                **_display(track),
+                "upcoming": self._upcoming_meta(),
             })
+            if where in ("liked", "cache", "net"):
+                asyncio.create_task(self._publish_audio_info(track))
             if i + 1 < len(self._queue):
                 self.output.prefetch(self._queue[i + 1])
             if self.wave is not None:
@@ -243,6 +265,7 @@ class Player:
             self._queue.extend(replace(t, origin="mix") for t in tracks)
             if was_last and self._pos + 1 < len(self._queue):
                 self.output.prefetch(self._queue[self._pos + 1])
+            self._publish_upcoming()
 
     async def _refill(self, generation: int) -> None:
         """Волна: впереди меньше REFILL_BELOW — досыпать AHEAD треков."""
@@ -265,6 +288,7 @@ class Player:
             self._queue.extend(t for t in tracks if t.ref not in queued)
             if was_last and self._pos + 1 < len(self._queue):
                 self.output.prefetch(self._queue[self._pos + 1])
+            self._publish_upcoming()
 
     # --- включение --------------------------------------------------------
 
@@ -409,6 +433,7 @@ class Player:
         async with self._lock:
             head = self._queue[: self._pos + 1]
             self._queue = head + self._playable([t for t in self._queue[self._pos + 1:] if t.ref != ref])
+            self._publish_upcoming()
             if is_current:
                 await self._close_play("disliked")
                 if self._pos + 1 < len(self._queue):
@@ -518,6 +543,22 @@ class Player:
         wave = " Играет твоя волна." if self.wave is not None else ""
         left = len(self._queue) - self._pos - 1
         return f"{state}: {track.title}.{liked}{wave} В очереди ещё {left}."
+
+    def _upcoming_meta(self) -> list[dict[str, Any]]:
+        return [{"ref": t.ref, **_display(t)} for t in self._queue[self._pos + 1:self._pos + 1 + UPCOMING_SHOWN]]
+
+    def _publish_upcoming(self) -> None:
+        if self.current is not None:
+            self.output.set_meta({"upcoming": self._upcoming_meta()})
+
+    async def _publish_audio_info(self, track: Track) -> None:
+        try:
+            info = await storage.audio_info(track.ref)
+        except Exception:
+            logger.exception("ffprobe не ответил про «%s»", track.title)
+            return
+        if info and self.current is track:
+            self.output.set_meta({"codec": info[0], "bitrate": info[1]})
 
     def upcoming(self, limit: int = 5) -> list[str]:
         return [t.title for t in self._queue[self._pos + 1:self._pos + 1 + limit]]

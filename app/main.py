@@ -17,6 +17,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import history
+from app.web_auth import WebAuth
 from app.agent import conflicts, router
 from app.agent.orchestrator import run_agent
 from app.config import settings
@@ -85,6 +86,8 @@ class _LocalOnly:
 
 
 app.add_middleware(_LocalOnly)
+# Добавлен последним — выполняется первым: без входа снаружи не пройти никуда.
+app.add_middleware(WebAuth)
 
 # In-memory по session_id — переживает процесс, не перезапуски. Для пилота
 # этого достаточно; персистентность истории не нужна раньше многопользовательского режима.

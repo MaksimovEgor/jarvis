@@ -108,3 +108,12 @@ def test_artist_from_channel_or_title() -> None:
     assert _artist("Linkin Park", "In The End - Linkin Park") == "Linkin Park"
     assert _artist("Kino Official", "Виктор Цой - Группа Крови") == "Виктор Цой"
     assert _artist("NA", "Everlong") is None
+
+
+def test_split_title() -> None:
+    from app.music.models import split_title
+
+    assert split_title("Foo Fighters - Everlong", "Foo Fighters") == ("Everlong", "Foo Fighters")
+    assert split_title("In The End - Linkin Park", "Linkin Park") == ("In The End", "Linkin Park")
+    assert split_title("Кино - Кукушка", None) == ("Кукушка", "Кино")
+    assert split_title("Everlong", "Foo Fighters") == ("Everlong", "Foo Fighters")

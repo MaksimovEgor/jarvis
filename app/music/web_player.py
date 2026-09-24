@@ -38,6 +38,8 @@ class PlayerReport(BaseModel):
     stalled: bool = False
     # Экран придержал музыку (слушает «Джарвис», играет объявление) — не зависание.
     held: bool | None = None
+    # iOS не дал включить звук без касания — ждём тап, это не зависание.
+    blocked: bool | None = None
     volume_supported: bool | None = None
     hls: bool | None = None
     # Вкладка на экране или свёрнута — решает, слать ли пуш.

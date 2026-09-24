@@ -94,6 +94,8 @@ export interface PlayerReport {
   stalled?: boolean
   // Музыка придержана экраном (слушаем «Джарвис», объявление) — сторожу не зависание.
   held?: boolean
+  // iOS не разрешил play() без касания — это не зависание.
+  blocked?: boolean
 }
 
 // Диагностика с телефона в журнал ядра: в Safari на iPhone нет консоли под рукой.

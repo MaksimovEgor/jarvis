@@ -38,6 +38,32 @@ export interface PlayerState {
   // «волна · вечер», «мои лайки» — откуда трек в очереди.
   origin?: string | null
   from?: FromWhere | null
+  // Для экрана: песня и исполнитель раздельно, обложка, источник, качество.
+  song?: string | null
+  artist?: string | null
+  cover?: string | null
+  service?: string | null
+  codec?: string | null
+  bitrate?: number | null
+  upcoming?: UpcomingTrack[]
+}
+
+export interface UpcomingTrack {
+  ref: string
+  song: string
+  artist: string | null
+  cover: string | null
+}
+
+// То, что показывают мини-плеер и «Сейчас играет».
+export interface TrackMeta {
+  song: string
+  artist: string | null
+  cover: string | null
+  service: string | null
+  codec: string | null
+  bitrate: number | null
+  upcoming: UpcomingTrack[]
 }
 
 export type Rating = 1 | -1 | null

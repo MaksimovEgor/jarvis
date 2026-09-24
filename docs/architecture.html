@@ -580,6 +580,7 @@ flowchart TD
         <div class="note"><h3>Профиль dj</h3><p><code>~/.hermes/profiles/dj</code>, <code>hermes-dj.service</code>, API 127.0.0.1:8643, инструменты — память, веб, история. Ключ DeepSeek и прокси скопированы из основного, токена Telegram нет. Недоступен → тот же промпт в <code>LLM_*</code> → без зёрен и разметки.</p></div>
         <div class="note"><h3>dj учится</h3><p>Раз в сутки в 04:00 — сводка прослушиваний; dj сам пишет устойчивые выводы в свою <code>MEMORY.md</code>. «Я не люблю рэп» основному Hermes → <code>music_taste_note</code> → заметка в библиотеке → в каждом запросе к dj.</p></div>
         <div class="note"><h3>Хранилище 10 ГБ</h3><p><code>liked/</code> не вытесняется; <code>cache/</code> — LRU в пределах «лимит минус лайки». Лайк: cache→liked, снятие: обратно, дизлайк: удалить из кэша. Лайки у 90 % лимита — предупреждение в журнал.</p></div>
+        <div class="note"><h3>Экран плеера</h3><p>Мини-плеер над полем ввода (обложка, песня, исполнитель, ♡, ▶, ⏭), тап — «Сейчас играет»: обложка, 👎/♡, источник (YouTube Music / YouTube / радио), кодек и битрейт (<code>ffprobe</code> файла), откуда звук, перемотка ±15/30, «Дальше» из снимка SSE. Обложка — <code>/media/cover/&lt;id&gt;</code>: превью YouTube через ядро, кэш <code>data/music/covers</code>; цвет фона — средний цвет обложки через canvas.</p></div>
         <div class="note"><h3>Метрика</h3><p><code>GET /library/stats?days=7</code>: доля дослушанных в волне (цель ≥ 70 %), пропуски, дизлайки, зависания (цель 0), доля из кэша, медиана старта.</p></div>
       </div>
     </section>
@@ -699,6 +700,7 @@ sequenceDiagram
           <tr><td class="m">POST /player/report, /player/control</td><td>браузер</td><td>Отчёт плеера, кнопки</td></tr>
           <tr><td class="m">POST /library/rate, /library/play, /library/unmute</td><td>браузер</td><td>Лайк/дизлайк, запуск волны/лайков/трека, «Вернуть» исполнителя</td></tr>
           <tr><td class="m">GET /library/likes, hidden, storage, stats</td><td>браузер, человек</td><td>«Моя музыка», место, метрика волны</td></tr>
+          <tr><td class="m">GET /media/cover/{id}</td><td>&lt;img&gt;</td><td>Обложка трека, кэш на диске</td></tr>
           <tr><td class="m">GET /media/yt, /media/hls, /media/ref</td><td>&lt;audio&gt;, mpv</td><td>Звук через ядро</td></tr>
           <tr><td class="m">/push/key, /push/subscribe, /push/unsubscribe</td><td>браузер</td><td>Web Push</td></tr>
           <tr><td class="m">POST /client/log</td><td>браузер</td><td>Диагностика wake word в журнал</td></tr>

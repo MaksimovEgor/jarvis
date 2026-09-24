@@ -16,3 +16,5 @@ aiohttp-socks
 # Web Push (app/services/webpush.py): VAPID и шифрование; уже приходят с mcp
 cryptography
 PyJWT
+# Вход в веб снаружи (app/web_auth.py): тот же bcrypt-хэш, что был в Caddy
+bcrypt

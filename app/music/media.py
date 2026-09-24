@@ -29,7 +29,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app.config import settings
-from app.music import youtube
+from app.music import storage, youtube
 from app.music.models import Track
 
 logger = logging.getLogger("jarvis.media")
@@ -122,6 +122,25 @@ async def youtube_hls_segment(video_id: str, n: int) -> Response:
             return StreamingResponse(body, status_code=status, headers=passed)
         logger.warning("HLS-сегмент %s/%s: googlevideo ответил %s", video_id, n, status)
     raise HTTPException(502, "YouTube не отдал сегмент")
+
+
+@router.get("/cover/{video_id}")
+async def cover(video_id: str) -> Response:
+    """Обложка трека (превью YouTube) — через ядро и с кэшем на диске: так
+    она с того же origin (цвет фона плеера берётся через canvas) и не зависит от
+    доступности i.ytimg.com с телефона. Для песен YouTube Music это обложка альбома."""
+    if not _VIDEO_ID.match(video_id):
+        raise HTTPException(404)
+    path = storage.cover_dir() / f"{video_id}.jpg"
+    if not path.exists():
+        try:
+            data = await youtube.fetch_bytes(f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+        except Exception as exc:
+            logger.warning("Нет обложки %s: %s", video_id, exc)
+            raise HTTPException(404)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=604800"})
 
 
 @router.get("/ref/{token}")

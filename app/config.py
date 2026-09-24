@@ -82,5 +82,11 @@ class Settings(BaseSettings):
 
     session_history_limit: int = 20
 
+    # Вход в веб снаружи (app/web_auth.py): bcrypt-хэш пароля (тот, что был в
+    # basic auth Caddy). Пусто — без входа (локальная разработка).
+    web_auth_user: str = "egor"
+    web_auth_hash: str = ""
+    web_session_days: int = 365
+
 
 settings = Settings()

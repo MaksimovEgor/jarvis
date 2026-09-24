@@ -20,7 +20,7 @@ const emit = defineEmits<{
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(88px + env(safe-area-inset-bottom));
+  bottom: calc(160px + env(safe-area-inset-bottom));
   z-index: 20;
   display: flex;
   align-items: center;

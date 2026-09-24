@@ -168,3 +168,36 @@ async def test_strict_mood_start_skips_like_radio(monkeypatch: pytest.MonkeyPatc
     await wave.Wave("web:x", "sleep").more([], 3, tag=False)
     assert "seed" not in radio_calls
     assert searches == [wave.COLD_START["sleep"]]
+
+
+async def test_watchdog_ignores_track_that_never_started(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Регрессия: iOS заблокировал play() — позиция не росла, сторож листал треки.
+    from app.music.outputs import WebOutput
+
+    output = WebOutput("web:watchdog-test")
+    monkeypatch.setattr(WebOutput, "STALL_SECONDS", 0.0)
+    monkeypatch.setattr(WebOutput, "STALL_CHECK_SECONDS", 0.01)
+    monkeypatch.setattr(WebOutput, "_busy", lambda self: False)
+    monkeypatch.setattr(WebOutput, "watching", property(lambda self: True))
+    player = Player("web:watchdog-test", output)
+    monkeypatch.setattr(output, "_src", _fake_src)
+    monkeypatch.setattr(output, "prefetch", lambda track: None)
+    await player._start_queue([yt("a", "A"), yt("b", "B")])
+    import asyncio
+    await asyncio.sleep(0.1)
+    assert player.current.ref == "a"
+    await output.report({"seq": output._state["seq"], "position": 5.0})
+    await asyncio.sleep(0.1)
+    assert player.current.ref == "b"
+    output._watchdog.cancel()
+
+
+async def _fake_src(track):
+    return f"media/yt/{track.ref}"
+
+
+async def test_meta_has_display_fields() -> None:
+    player, output = await _player("a", "b")
+    assert output.meta["song"] == "song a" and output.meta["artist"] == "artist-a"
+    assert output.meta["cover"] == "media/cover/a"
+    assert [u["ref"] for u in output.meta["upcoming"]] == ["b"]
