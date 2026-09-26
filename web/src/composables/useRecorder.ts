@@ -32,12 +32,14 @@ export function useRecorder() {
   let recorder: MediaRecorder | null = null
   let chunks: Blob[] = []
   let vadTimer: number | null = null
+  let source: MediaStreamAudioSourceNode | null = null
 
   function watchSilence(stream: MediaStream, auto: AutoStop): void {
     const ctx = audioContext()
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 1024
-    ctx.createMediaStreamSource(stream).connect(analyser)
+    source = ctx.createMediaStreamSource(stream)
+    source.connect(analyser)
     const buf = new Float32Array(analyser.fftSize)
     const startedAt = Date.now()
     let noise = 0
@@ -79,6 +81,10 @@ export function useRecorder() {
       clearInterval(vadTimer)
       vadTimer = null
     }
+    // Микрофон, подключённый к общему AudioContext, держит iOS в режиме
+    // записи — Bluetooth не возвращается из «гарнитуры» в стерео.
+    source?.disconnect()
+    source = null
   }
 
   async function start(auto?: AutoStop): Promise<void> {

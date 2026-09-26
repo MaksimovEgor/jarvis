@@ -271,11 +271,15 @@ const placeholder = computed(() => {
   return 'Написать…'
 })
 
+// Пока играет музыка, «Джарвис» не слушаем: открытый микрофон на iPhone
+// переводит Bluetooth-наушники в режим гарнитуры (моно, 16 кГц) — музыка
+// звучит как по телефону. Во время музыки говорить — кнопкой.
 function syncWake(): void {
-  if (status.value !== 'recording' && document.visibilityState === 'visible') wake.resume()
+  const free = status.value !== 'recording' && !music.wantPlaying.value
+  if (free && document.visibilityState === 'visible') wake.resume()
   else wake.pause()
 }
-watch(status, syncWake, { immediate: true })
+watch([status, music.wantPlaying], syncWake, { immediate: true })
 document.addEventListener('visibilitychange', syncWake)
 
 // --- озвучка ответов: по очереди, и только когда пользователь не говорит ---
