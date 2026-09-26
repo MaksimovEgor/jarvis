@@ -76,7 +76,10 @@ def _base_args() -> list[str]:
     if settings.youtube_proxy:
         args += ["--proxy", settings.youtube_proxy]
     if runtime := _js_runtime():
-        args += ["--js-runtimes", runtime]
+        # Скрипт разгадки подписи YouTube (EJS) — без него часть видео
+        # (детские сказки, например) отдаёт «This video is not available».
+        # Качается с GitHub один раз и лежит в кэше yt-dlp.
+        args += ["--js-runtimes", runtime, "--remote-components", "ejs:github"]
     return args
 
 

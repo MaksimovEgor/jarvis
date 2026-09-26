@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
-from app.agent.tools import music, web_fetch, web_search
+from app.agent.tools import music, weather, web_fetch, web_search
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
 
 TOOLS: list[dict[str, Any]] = [
+    weather.SCHEMA,
     web_search.SCHEMA,
     web_fetch.SCHEMA,
     music.SCHEMA,
 ]
 
 _HANDLERS: dict[str, ToolHandler] = {
+    weather.SCHEMA["function"]["name"]: weather.run,
     web_search.SCHEMA["function"]["name"]: web_search.run,
     web_fetch.SCHEMA["function"]["name"]: web_fetch.run,
     music.SCHEMA["function"]["name"]: music.run,

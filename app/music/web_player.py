@@ -80,7 +80,11 @@ async def queue_remove(req: QueueAction) -> dict:
 
 @router.post("/queue/play")
 async def queue_play(req: QueueAction) -> dict:
-    player = devices.player_for(_web_device(req.device))
+    from app.turns import turns  # app.turns → devices → … — без цикла при импорте
+
+    device = _web_device(req.device)
+    turns.cancel_media(device)
+    player = devices.player_for(device)
     text = await player.play_at(req.index)
     return {**player.queue_view(), "text": text}
 

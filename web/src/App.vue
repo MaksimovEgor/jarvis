@@ -456,11 +456,6 @@ function errorText(e: unknown): string {
       />
       Джарвис
       <span class="app__spacer" />
-      <button class="app__icon" aria-label="Поиск музыки" title="Поиск: Яндекс, YouTube, SoundCloud, книги, подкасты" @click="openSearch">
-        <svg viewBox="0 0 24 24">
-          <path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z" />
-        </svg>
-      </button>
       <button
         class="app__icon"
         aria-label="Моя музыка"
@@ -507,6 +502,7 @@ function errorText(e: unknown): string {
       @open="openNowPlaying()"
       @toggle="music.toggle"
       @next="music.next"
+      @previous="music.previous"
       @like="onLike"
     />
 
@@ -549,13 +545,18 @@ function errorText(e: unknown): string {
       @like="onLike"
       @dislike="onDislike"
     />
+    <MyMusic
+      v-if="showLibrary"
+      @close="showLibrary = false"
+      @search="openSearch"
+      @played="(text) => showToast(text)"
+    />
     <SearchScreen
       v-if="showSearch"
       @close="showSearch = false"
       @played="(text) => showToast(text)"
       @lyrics="openNowPlaying('lyrics')"
     />
-    <MyMusic v-if="showLibrary" @close="showLibrary = false" @played="(text) => showToast(text)" />
     <RateToast v-if="music.blocked.value && !toast" text="Коснись экрана, чтобы включить звук" :undo="false" />
     <RateToast v-if="toast" :text="toast.text" :undo="toast.undoRef !== null" @undo="onUndo" />
   </main>

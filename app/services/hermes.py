@@ -22,6 +22,10 @@ Hermes отвечает 503 (gateway_draining), пока перезагружа�
 `kill -USR1`, а при рестарте не принимает соединения. Такие ошибки случаются
 до начала потока — агент ещё ничего не сделал, и запрос безопасно повторить.
 Оборвавшийся поток не повторяем: инструменты могли уже сработать.
+По той же причине, если Hermes успел вызвать инструмент (включил музыку),
+а потом поток оборвался или ответ пришёл без текста, — это не ошибка:
+ход считается сделанным («Готово»). Иначе ядро отдавало реплику запасному
+агенту, и музыка включалась второй раз.
 
 Разговор начинается заново после паузы (как у Алисы): одна бессрочная
 conversation разрослась до 2500 сообщений и ~370k токенов на каждую реплику —
@@ -55,6 +59,9 @@ _running: dict[str, int] = {}
 # Паузы перед повторами запроса, который Hermes не начал выполнять.
 _RETRY_DELAYS = (2.0, 4.0, 8.0)
 _RETRY_STATUSES = {502, 503, 504}
+
+# Инструмент сработал, а текста ответа нет (или поток оборвался после него).
+DONE_WITHOUT_TEXT = "Готово."
 
 # Финальные события потока /v1/responses.
 _FINAL_EVENTS = ("response.completed", "response.failed", "response.incomplete")
@@ -108,21 +115,32 @@ async def _stream(conversation: str, user_text: str, on_tool: Callable[[str], No
 
     # Без лимита на чтение: долгие задачи законны, останавливает их отмена хода.
     timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
+    called: list[str] = []
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             resp.raise_for_status()
             event = ""
-            async for line in resp.aiter_lines():
-                if line.startswith("event: "):
-                    event = line[len("event: "):]
-                elif not line.startswith("data: "):
-                    continue
-                elif event in _FINAL_EVENTS:
-                    return parse_output(json.loads(line[len("data: "):])["response"])
-                elif event == "response.output_item.done" and on_tool is not None:
-                    item = json.loads(line[len("data: "):]).get("item") or {}
-                    if item.get("type") == "function_call":
-                        on_tool(_tool_name(item))
+            try:
+                async for line in resp.aiter_lines():
+                    if line.startswith("event: "):
+                        event = line[len("event: "):]
+                    elif not line.startswith("data: "):
+                        continue
+                    elif event in _FINAL_EVENTS:
+                        return parse_output(json.loads(line[len("data: "):])["response"])
+                    elif event == "response.output_item.done":
+                        item = json.loads(line[len("data: "):]).get("item") or {}
+                        if item.get("type") == "function_call":
+                            called.append(_tool_name(item))
+                            if on_tool is not None:
+                                on_tool(called[-1])
+            except httpx.HTTPError:
+                if not called:
+                    raise
+                logger.warning("Поток Hermes оборвался после %s — считаю сделанным", called)
+                return DONE_WITHOUT_TEXT, called
+    if called:
+        return DONE_WITHOUT_TEXT, called
     raise RuntimeError("Hermes закрыл поток без ответа")
 
 
@@ -150,6 +168,8 @@ def parse_output(data: dict[str, Any]) -> tuple[str, list[str]]:
             texts.extend(part.get("text", "") for part in item.get("content") or [] if part.get("type") == "output_text")
 
     reply = "\n".join(t for t in texts if t).strip()
+    if not reply and tools:
+        return DONE_WITHOUT_TEXT, tools
     if not reply:
         raise RuntimeError(f"Hermes вернул ответ без текста (status={data.get('status')})")
     return reply, tools

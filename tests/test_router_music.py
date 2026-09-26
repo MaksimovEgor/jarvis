@@ -79,3 +79,22 @@ async def test_show_lyrics_phrases(monkeypatch: pytest.MonkeyPatch, text: str) -
     monkeypatch.setattr(type(player.output), "show", lambda self, what: shown.append(what))
     reply = await router.try_fast(text, DEVICE)
     assert reply is not None and reply.tool == "show_lyrics" and shown == ["lyrics"]
+
+
+@pytest.mark.parametrize("text, query", [
+    ("Включи сказку про автобус", "сказка автобус"),
+    ("сказку про автобус найди", "сказка автобус"),
+    ("найди и включи аудиосказку про автобус который боялся темноты", "сказка автобус который боялся темноты"),
+    ("Детскую сказку про автобус, который боялся темноты.", "сказка автобус который боялся темноты"),
+    ("включи нам сказку колобок", "сказка колобок"),
+    ("включи сказку", router.DEFAULT_TALE),
+])
+async def test_tale_goes_straight_to_player(calls: dict[str, AsyncMock], text: str, query: str) -> None:
+    reply = await router.try_fast(text, DEVICE)
+    assert reply is not None and reply.tool == "play_music"
+    assert calls["play_query"].await_args.args[-2:] == (query, "audiobook")
+
+
+@pytest.mark.parametrize("text", ["расскажи сказку", "включи сказку про автобус и сделай погромче"])
+async def test_tale_not_fast(calls: dict[str, AsyncMock], text: str) -> None:
+    assert await router.try_fast(text, DEVICE) is None

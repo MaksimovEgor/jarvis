@@ -2,6 +2,7 @@
 import { computed, toRef } from 'vue'
 
 import { useCoverColor } from '../composables/useCoverColor'
+import { useSwipe } from '../composables/useSwipe'
 import type { Rating, TrackMeta } from '../types'
 import CoverArt from './CoverArt.vue'
 
@@ -22,8 +23,16 @@ const emit = defineEmits<{
   open: []
   toggle: []
   next: []
+  previous: []
   like: []
 }>()
+
+// Свайп по мини-плееру влево — следующий трек, вправо — предыдущий.
+const swipe = useSwipe({ left: () => emit('next'), right: () => emit('previous') })
+
+function onOpen(): void {
+  if (!swipe.wasSwipe()) emit('open')
+}
 
 const color = useCoverColor(toRef(() => props.meta.cover))
 
@@ -38,9 +47,17 @@ const subtitle = computed(() => {
 <template>
   <section
     class="mini"
-    :style="{ '--tint': color ?? 'var(--surface)' }"
+    :style="{
+      '--tint': color ?? 'var(--surface)',
+      transform: swipe.dx.value ? `translateX(${swipe.dx.value}px)` : undefined,
+    }"
+    :class="{ 'mini--drag': swipe.dx.value }"
     aria-label="Плеер, открыть «Сейчас играет»"
-    @click="emit('open')"
+    @click="onOpen"
+    @touchstart.passive="swipe.onTouchStart"
+    @touchmove.passive="swipe.onTouchMove"
+    @touchend="swipe.onTouchEnd"
+    @touchcancel="swipe.onTouchEnd"
   >
     <CoverArt class="mini__cover" :src="meta.cover" :crop="meta.coverCrop" :live="live" />
     <div class="mini__info">
@@ -87,8 +104,15 @@ const subtitle = computed(() => {
   background: linear-gradient(90deg, var(--tint), var(--surface) 75%);
   box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
   cursor: pointer;
-  transition: background 0.4s;
+  transition:
+    background 0.4s,
+    transform 0.25s;
   -webkit-tap-highlight-color: transparent;
+  touch-action: pan-y;
+
+  &--drag {
+    transition: background 0.4s;
+  }
 
   &__cover {
     flex: none;

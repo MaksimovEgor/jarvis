@@ -27,6 +27,9 @@ from app.services import tts
 
 FIRST_CHARS = 100
 MAX_CHARS = 400
+# Вслух — не больше ~30 секунд: длинный ответ целиком остаётся на экране.
+SPOKEN_MAX_CHARS = 450
+_MORE_ON_SCREEN = "Остальное — на экране."
 # Синтез идёт ~0,4 от длительности звука: кусок вдвое длиннее предыдущего
 # успевает синтезироваться, пока предыдущий звучит, — без пауз.
 GROWTH = 2
@@ -89,13 +92,34 @@ async def speak(text: str, inline: bool = True) -> Spoken:
     клиент забирает по id, а не в base64 внутри события — события хранятся
     для повтора переподключившемуся браузеру и должны быть лёгкими."""
     _prune()
-    chunks = _split(tts.clean(text))
+    text = for_voice(tts.clean(text))
+    chunks = _split(text)
     if inline and len(chunks) <= 1:
         return Spoken(base64.b64encode(await _synth(text)).decode())
     job_id = uuid.uuid4().hex
     job = _jobs[job_id] = _Job(chunks or [text])
+    if not inline:
+        # Веб заберёт кусок 0 по id — текст ответа уходит на экран сразу,
+        # не дожидаясь синтеза (раньше ждал его ~1-2 с).
+        _ensure(job, 0)
+        return Spoken(None, job_id, len(job.chunks))
     first = await chunk(job_id, 0)
-    return Spoken(base64.b64encode(first).decode() if inline else None, job_id, len(job.chunks))
+    return Spoken(base64.b64encode(first).decode(), job_id, len(job.chunks))
+
+
+def for_voice(text: str) -> str:
+    """Столько целых фраз, сколько влезает в SPOKEN_MAX_CHARS, — иначе модель,
+    выдавшая простыню, читала бы её минутами."""
+    if len(text) <= SPOKEN_MAX_CHARS:
+        return text
+    spoken = ""
+    for sentence in re.split(r"(?<=[.!?…])\s+", text):
+        if spoken and len(spoken) + len(sentence) + 1 > SPOKEN_MAX_CHARS:
+            break
+        spoken = f"{spoken} {sentence}".strip()
+    if len(spoken) > SPOKEN_MAX_CHARS:  # одна огромная фраза без точек
+        spoken = spoken[:SPOKEN_MAX_CHARS].rsplit(" ", 1)[0] + "…"
+    return f"{spoken} {_MORE_ON_SCREEN}"
 
 
 async def chunk(job_id: str, n: int) -> bytes:

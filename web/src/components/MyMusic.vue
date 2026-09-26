@@ -8,6 +8,7 @@ import YandexCard from './YandexCard.vue'
 
 const emit = defineEmits<{
   close: []
+  search: []
   played: [text: string]
 }>()
 
@@ -161,6 +162,12 @@ onMounted(() => void library.refresh())
         <svg viewBox="0 0 24 24"><path d="M15.4 7.4L14 6l-6 6 6 6 1.4-1.4-4.6-4.6z" /></svg>
       </button>
       Моя музыка
+      <span class="lib__spacer" />
+      <button class="lib__back" aria-label="Поиск музыки" title="Поиск: Яндекс, YouTube, SoundCloud, книги, подкасты" @click="emit('search')">
+        <svg viewBox="0 0 24 24">
+          <path d="M15.5 14h-.8l-.3-.3A6.5 6.5 0 1 0 14 15.5l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z" />
+        </svg>
+      </button>
     </header>
 
     <div class="lib__scroll">
@@ -281,9 +288,13 @@ onMounted(() => void library.refresh())
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: calc(8px + env(safe-area-inset-top)) 16px 8px 6px;
+    padding: calc(8px + env(safe-area-inset-top)) 6px 8px;
     font-weight: 600;
     border-bottom: 1px solid var(--border);
+  }
+
+  &__spacer {
+    flex: 1;
   }
 
   &__back {

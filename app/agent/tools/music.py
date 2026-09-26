@@ -11,7 +11,8 @@ SCHEMA = {
     "function": {
         "name": "music",
         "description": (
-            "Музыка дома. play — включить (source=youtube: артист/песня/жанр, "
+            "Музыка, книги, сказки, подкасты. play — включить сразу первое подходящее "
+            "(source=youtube: артист/песня/жанр/книга — ищет в Яндексе, YouTube, SoundCloud, "
             "дальше сама играет очередь похожих; source=radio: query — название "
             "станции, genre — жанр по-английски; source=local — домашняя библиотека). "
             "pause, resume, stop, next, previous, volume (level 0-100 или delta ±), "
@@ -25,6 +26,11 @@ SCHEMA = {
                     "enum": ["play", "pause", "resume", "stop", "next", "previous", "volume", "now_playing"],
                 },
                 "source": {"type": "string", "enum": ["youtube", "local", "radio"]},
+                "kind": {
+                    "type": "string",
+                    "enum": ["music", "audiobook", "podcast"],
+                    "description": "Для play: audiobook — книга или сказка, podcast — подкаст, лекция, выпуск",
+                },
                 "query": {"type": "string", "description": "Что искать/включить"},
                 "genre": {"type": "string", "description": "Жанр радио по-английски: jazz, rock…"},
                 "level": {"type": "integer", "description": "Громкость 0-100"},
@@ -48,7 +54,7 @@ async def run(arguments: dict) -> str:
             return await player.play_radio(query or None, arguments.get("genre"), None)
         if source == "local":
             return await player.play_local(query)
-        return await player.play_youtube(query)
+        return await player.play_query(query, arguments.get("kind", "music"))
     if action == "volume":
         return await player.volume(level=arguments.get("level"), delta=arguments.get("delta"))
     handlers = {

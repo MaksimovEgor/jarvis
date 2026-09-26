@@ -31,6 +31,7 @@ from app.services.llm import get_llm
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 4
+DONE = "Готово."
 
 
 # Когда локальной модели нужен поиск. Своим знаниям 3B-модели верить нельзя
@@ -44,6 +45,7 @@ _NEEDS_SEARCH = re.compile(
     r"как(?:ой|ая|ое|ие|ов|ова|ую)|что\s+(?:такое|значит|было|случилось|произошло)|чем|чей|чья)\b",
     re.IGNORECASE,
 )
+_WEATHER = re.compile(r"\bпогод\w*|\bзонт\w*|\bдожд\w*", re.IGNORECASE)
 # Посчитать модель может сама — поиск тут только мешает.
 _ARITHMETIC = re.compile(r"\d.*(?:умнож|раздел|плюс|минус|[-+*/×÷]).*\d|сколько будет", re.IGNORECASE)
 # Просьба что-то сделать. Модель на такое отвечает «сделал» или повторяет просьбу,
@@ -61,13 +63,23 @@ LOCAL_CANT_ACT = (
 _FILLER = re.compile(r"^(?:джарвис|jarvis)[,\s]*|^(?:найди|поищи|загугли|узнай)(?:\s+мне)?\s+", re.IGNORECASE)
 
 
-async def run_agent(history: list[dict], user_text: str, local: bool = False) -> tuple[str, list[str]]:
-    """local — сразу локальная модель на GPU asus, мимо облака (Telegram /local)."""
+class CloudUnavailable(RuntimeError):
+    """Облачная LLM не ответила, а ничего ещё не сделано — ход можно отдать другому."""
+
+
+async def run_agent(
+    history: list[dict], user_text: str, local: bool = False, fallback_local: bool = True,
+) -> tuple[str, list[str]]:
+    """local — сразу локальная модель на GPU asus, мимо облака (Telegram /local).
+    fallback_local=False — облако не ответило: CloudUnavailable вместо локальной
+    модели (ядро тогда отдаёт реплику Hermes)."""
     if local or settings.llm_mode == "local":
         return await _run_local(history, user_text)
     try:
         return await _run_cloud(history, user_text)
     except (httpx.HTTPError, RuntimeError) as exc:
+        if not fallback_local:
+            raise CloudUnavailable(str(exc)) from exc
         logger.warning("Облачная LLM не ответила (%s) — отвечает локальная", exc)
         return await _run_local(history, user_text)
 
@@ -77,7 +89,11 @@ async def _run_local(history: list[dict], user_text: str) -> tuple[str, list[str
         _remember(history, user_text, LOCAL_CANT_ACT)
         return LOCAL_CANT_ACT, []
     prompt, used = user_text, []
-    if _NEEDS_SEARCH.search(user_text.strip()) and not _ARITHMETIC.search(user_text):
+    if _WEATHER.search(user_text):
+        found = await call_tool("weather", {})
+        used.append("weather")
+        prompt = f"{user_text}\n\nПогода:\n{found}\n\nОтветь по этим данным, коротко."
+    elif _NEEDS_SEARCH.search(user_text.strip()) and not _ARITHMETIC.search(user_text):
         found = await call_tool("web_search", {"query": _FILLER.sub("", user_text).strip() or user_text})
         used.append("web_search")
         prompt = (
@@ -101,8 +117,20 @@ async def _run_cloud(history: list[dict], user_text: str) -> tuple[str, list[str
     llm = get_llm()
     used_tools: list[str] = []
 
-    for _ in range(MAX_TOOL_ITERATIONS):
-        message = await llm.cloud(messages, TOOLS)
+    for step in range(MAX_TOOL_ITERATIONS):
+        # Последний шаг — без инструментов: ответить по тому, что уже нашлось,
+        # а не «не получилось разобраться» после минуты поиска.
+        last = step == MAX_TOOL_ITERATIONS - 1
+        try:
+            message = await llm.cloud(messages, None if last else TOOLS)
+        except (httpx.HTTPError, RuntimeError):
+            if not used_tools:
+                raise
+            # Инструмент уже сработал (музыка включилась) — повторять ход
+            # другим агентом нельзя, иначе действие выполнится дважды.
+            logger.warning("LLM упала после %s — считаю сделанным", used_tools)
+            _remember(history, user_text, DONE)
+            return DONE, used_tools
         messages.append(message)
 
         tool_calls = message.get("tool_calls") or []

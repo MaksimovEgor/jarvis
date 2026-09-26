@@ -23,14 +23,15 @@ POST через Caddy и ssh-туннель рвался (свёрнутая в�
                                         │ WebOutput хранит события (outputs.py)
     SSE переподключился ◄───────────────┘ пропущенные досылаются + список идущих ходов
 
-Основной план и фон. Отвечать быстро важнее, чем держать долгий ресерч
-на переднем плане:
+Основной план и фон. В фон ход уходит только по просьбе — иначе ответ
+звучал внезапно, минуты спустя, и было непонятно, к чему он:
 
-    реплика ─► start ─► уложился в бюджет (FOREGROUND_BUDGET_SECONDS)? ── да ─► ответ
-                            │ нет, или «…в фоне» (conflicts.wants_background)
-                            ▼
+    реплика ─► start ─► «…в фоне» (conflicts.wants_background)? ── нет ─► ждём ответ
+                            │ да                           (не дольше FOREGROUND_LIMIT_SECONDS,
+                            ▼                            дальше «не успел», main._answer)
                       demote: ход фоновый — не держит «думаю» и музыку,
-                      новые реплики его не отменяют (кроме ✕ и явного «отмени …»)
+                      новые реплики его не отменяют (кроме ✕, явного «отмени …»
+                      и нового «включи…» — звук один)
                             │ готово
                             ▼
                       ответ событием (веб) или объявлением (asus, speaker.py)
@@ -108,7 +109,13 @@ class Turns:
         work: Callable[[Progress], Awaitable[Answer]],
     ) -> Turn:
         """Запустить ход; новая реплика может отменить идущие на переднем плане."""
-        running = [t for t in self._active.values() if t.session_id == session_id and not t.background]
+        # Звук у устройства один: новое «включи» сразу отменяет все прошлые
+        # «включи» — и фоновые тоже, иначе долгий поиск включал своё поверх.
+        replaced = self.cancel_media(device) if conflicts.is_media(text) else set()
+        running = [
+            t for t in self._active.values()
+            if t.session_id == session_id and not t.background and t.id not in replaced
+        ]
 
         def progress(tool: str) -> None:
             if current := self._active.get(turn_id):
@@ -122,12 +129,6 @@ class Turns:
         if running:
             asyncio.create_task(self._resolve(turn, running))
         return turn
-
-    @staticmethod
-    async def within(turn: Turn, seconds: float) -> bool:
-        """Закончился ли ход за seconds (сам ход при этом не трогаем)."""
-        done, _ = await asyncio.wait({turn.task}, timeout=seconds)
-        return bool(done)
 
     @staticmethod
     def demote(turn: Turn) -> None:
@@ -163,6 +164,18 @@ class Turns:
             if not old.task.done():
                 logger.info("«%s» отменяет «%s»", new.text, old.text)
                 old.task.cancel()
+
+    def cancel_media(self, device: str) -> set[str]:
+        """Отменить идущие просьбы включить что-то на устройстве (новая просьба
+        или тап «играть» в приложении). Возвращает id отменённых."""
+        victims = {
+            t.id: t for t in self._active.values()
+            if t.device == device and not t.task.done() and conflicts.is_media(t.text)
+        }
+        for t in victims.values():
+            logger.info("Звук один: отменяю «%s»", t.text)
+            t.task.cancel()
+        return set(victims)
 
     def cancel(self, session_id: str, turn_id: str | None = None) -> int:
         """Отменить одну просьбу (✕ в чате, в том числе фоновую) или все

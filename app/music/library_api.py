@@ -28,6 +28,7 @@ from app.music.library import TrackInfo, library
 from app.music.models import Diversity, Entity, EntityType, Language, Mood, MoodEnergy, Rating, SearchTab, WaveSpec
 from app.music.wave import MOOD_PRESET, spec_mood
 from app.music.web_player import _web_device
+from app.turns import turns
 
 router = APIRouter(prefix="/library")
 
@@ -87,7 +88,11 @@ async def rate(req: RateRequest) -> dict:
 
 @router.post("/play")
 async def play(req: PlayRequest) -> dict:
-    player = devices.player_for(_web_device(req.device))
+    device = _web_device(req.device)
+    player = devices.player_for(device)
+    if req.mode != "next":
+        # Тап «играть» — последняя просьба: голосовые «включи…» в пути отменяются.
+        turns.cancel_media(device)
     if req.mode == "wave":
         spec = WaveSpec(**req.wave.model_dump()) if req.wave else MOOD_PRESET[req.mood]
         text = await player.play_wave(spec_mood(spec), spec=spec)

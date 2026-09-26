@@ -22,8 +22,12 @@ class Settings(BaseSettings):
     hermes_api_key: str = ""
     # Столько минут тишины — и голосовой разговор начинается с чистой истории.
     hermes_conversation_idle_minutes: int = 10
-    # Дольше этого ход не держит основной план: уходит в фон (app/turns.py).
-    foreground_budget_seconds: float = 12.0
+    # Дольше этого ход на переднем плане не ждём: отменяем и честно говорим
+    # «не успел». В фон ход уходит только по просьбе («…в фоне») — иначе
+    # ответ звучал внезапно, минуты спустя (app/main.py).
+    foreground_limit_seconds: float = 60.0
+    # Город по умолчанию для погоды («какая погода» без города).
+    home_city: str = "Москва"
     # Контакт в подписи VAPID (Apple требует mailto: или https:) — app/services/webpush.py.
     push_contact: str = "https://point.abrdns.com"
     # Отсюда берутся токен бота и чат для «пришли мне в Telegram».

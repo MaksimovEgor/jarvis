@@ -36,7 +36,7 @@ from app.config import settings
 from app.music import positions, radio, sources, storage, taste, yandex, youtube
 from app.music.library import artist_key, library
 from app.music.models import (
-    MOOD_RU, SLOT_RU, Entity, FromWhere, Kind, Mood, Outcome, Rating, Track, WaveSpec, split_title,
+    MOOD_RU, SLOT_RU, Entity, FromWhere, Kind, Mood, Outcome, Rating, Track, WaveSpec, short_title, split_title,
 )
 from app.music.outputs import Output
 from app.music.wave import AHEAD, REFILL_BELOW, Wave
@@ -334,9 +334,9 @@ class Player:
             generation = self._generation
         if kind == "music":
             asyncio.create_task(self._extend_with_mix(track, generation))
-            return f"Включаю: {track.title}. Дальше похожие треки."
+            return f"Включаю: {short_title(track.title)}. Дальше похожие треки."
         start = positions.start_for(track)
-        return f"Включаю: {track.title}" + (f", продолжаю с {_clock(start)}." if start else ".")
+        return f"Включаю: {short_title(track.title)}" + (f", продолжаю с {_clock(start)}." if start else ".")
 
     # Старое имя: MCP-инструмент и тесты зовут play_youtube.
     play_youtube = play_query
@@ -359,7 +359,7 @@ class Player:
                 return "Не получилось включить волну — треки не загрузились."
         label = wave.label or MOOD_RU[wave.mood]
         what = f" — {label}" if label else ""
-        return f"Включаю твою волну{what}: {track.title}."
+        return f"Включаю твою волну{what}: {short_title(track.title)}."
 
     async def play_liked(self, query: str | None = None) -> str:
         items = library.liked(limit=1000, query=query)
@@ -371,7 +371,7 @@ class Player:
         async with self._lock:
             self.wave = None
             track = await self._start_queue(tracks)
-        return f"Включаю твои лайки: {track.title}, всего {len(tracks)}."
+        return f"Включаю твои лайки: {short_title(track.title)}, всего {len(tracks)}."
 
     async def play_ref(self, ref: str) -> str:
         """Конкретный трек с экрана «Моя музыка», дальше — похожие."""
@@ -383,7 +383,7 @@ class Player:
             track = await self._start_queue([info.track("liked" if info.rating == 1 else "query")])
             generation = self._generation
         asyncio.create_task(self._extend_with_mix(track, generation))
-        return f"Включаю: {track.title}."
+        return f"Включаю: {short_title(track.title)}."
 
     async def resume_listening(self, query: str | None) -> str:
         items = positions.unfinished(query)
@@ -392,7 +392,7 @@ class Player:
         async with self._lock:
             self.wave = None
             track = await self._start_queue([items[0].track()])
-        return f"Продолжаю «{track.title}» с {_clock(positions.start_for(track))}."
+        return f"Продолжаю «{short_title(track.title)}» с {_clock(positions.start_for(track))}."
 
     async def play_radio(self, name: str | None, genre: str | None, country_code: str | None) -> str:
         stations = await radio.search(name=name, genre=genre, country_code=country_code)
@@ -403,7 +403,7 @@ class Player:
             # Остальные найденные станции — в очередь: «следующая» переключит
             # на похожую, а битый поток сам пропустится.
             track = await self._start_queue(stations)
-        return f"Включаю радио {track.title}."
+        return f"Включаю радио {short_title(track.title)}."
 
     async def play_local(self, query: str) -> str:
         library_dir = Path(settings.music_library_dir)
@@ -420,7 +420,7 @@ class Player:
         async with self._lock:
             self.wave = None
             track = await self._start_queue([Track(title=p.stem, source="local", ref=str(p)) for p in files])
-        return f"Включаю {track.title}, всего {len(files)} в очереди."
+        return f"Включаю {short_title(track.title)}, всего {len(files)} в очереди."
 
     # --- поиск и очередь ----------------------------------------------------
 
@@ -448,8 +448,8 @@ class Player:
             asyncio.create_task(self._extend_with_mix(track, generation))
         if track.is_long:
             begin = positions.start_for(track)
-            return f"Включаю «{track.title}»" + (f" с {_clock(begin)}." if begin else ".")
-        return f"Включаю: {track.title}."
+            return f"Включаю «{short_title(track.title)}»" + (f" с {_clock(begin)}." if begin else ".")
+        return f"Включаю: {short_title(track.title)}."
 
     async def add_next(self, track: Track) -> str:
         """«Играть следующим» — сразу за текущим; ничего не играет — включить."""
@@ -457,11 +457,11 @@ class Player:
             if self.current is None:
                 self._queue, self._pos = [track], -1
                 await self._play_index(0)
-                return f"Включаю: {track.title}."
+                return f"Включаю: {short_title(track.title)}."
             self._queue.insert(self._pos + 1, replace(track, origin="query"))
             self.output.prefetch(track)
             self._publish_upcoming()
-        return f"Следующим: {track.title}."
+        return f"Следующим: {short_title(track.title)}."
 
     def queue_view(self) -> dict[str, Any]:
         return {
@@ -492,7 +492,7 @@ class Player:
                 return "Уже играет." if index == self._pos else "Нет такого трека в очереди."
             await self._close_play()
             track = await self._play_index(index)
-        return f"Включаю: {track.title}."
+        return f"Включаю: {short_title(track.title)}."
 
     # --- оценки -----------------------------------------------------------
 
@@ -606,7 +606,7 @@ class Player:
                 return "Дальше в очереди ничего нет."
             await self._close_play()
             track = await self._play_index(self._pos + 1)
-        return f"Следующий: {track.title}."
+        return f"Следующий: {short_title(track.title)}."
 
     async def previous(self) -> str:
         async with self._lock:
@@ -614,7 +614,7 @@ class Player:
                 return "Это первый трек в очереди."
             await self._close_play()
             track = await self._play_index(self._pos - 1)
-        return f"Предыдущий: {track.title}."
+        return f"Предыдущий: {short_title(track.title)}."
 
     async def seek(self, delta: float | None = None, position: float | None = None) -> str:
         track = self.current
@@ -643,15 +643,15 @@ class Player:
         state = "На паузе" if paused else "Играет"
         if track.source == "radio":
             song = await self.output.stream_title()
-            return f"{state} радио {track.title}" + (f", сейчас в эфире: {song}." if song else ".")
+            return f"{state} радио {short_title(track.title)}" + (f", сейчас в эфире: {song}." if song else ".")
         if track.is_long:
             pos = await self.output.position() or 0
             total = f" из {_clock(track.duration)}" if track.duration else ""
-            return f"{state}: {track.title}, {_clock(pos)}{total}."
+            return f"{state}: {short_title(track.title)}, {_clock(pos)}{total}."
         liked = " Это из твоих лайков." if library.rating(track.ref) == 1 else ""
         wave = " Играет твоя волна." if self.wave is not None else ""
         left = len(self._queue) - self._pos - 1
-        return f"{state}: {track.title}.{liked}{wave} В очереди ещё {left}."
+        return f"{state}: {short_title(track.title)}.{liked}{wave} В очереди ещё {left}."
 
     def _upcoming_meta(self) -> list[dict[str, Any]]:
         upcoming = self._queue[self._pos + 1:self._pos + 1 + UPCOMING_SHOWN]

@@ -20,7 +20,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app import history
 from app.web_auth import WebAuth
 from app.agent import conflicts, router
-from app.agent.orchestrator import run_agent
+from app.agent.orchestrator import CloudUnavailable, run_agent
 from app.config import settings
 from app.mcp_server import mcp
 from app.music import devices, library_api, media, taste, web_player, yandex
@@ -114,33 +114,59 @@ async def _stop_everything(
     return "Хорошо.", [], await speech.speak("Хорошо.", inline) if speak else None
 
 
+_TOO_SLOW = "Не успел разобраться за минуту. Если это надолго — скажи «в фоне», сделаю и сообщу."
+
+
 async def _answer(
     session_id: str, text: str, device: str, speak: bool, inline: bool, progress: Callable[[str], None],
 ) -> tuple[str, list[str], Spoken | None]:
     """Весь ход целиком — и ответ, и его озвучка: «стоп» должен отменять и
     синтез длинного ответа, иначе он прозвучит уже после «стопа».
-    Простые команды («включи…», «пауза», «таймер на…») — быстрым путём без Hermes."""
+
+        быстрые команды (router) ─► плеер, таймер — доли секунды
+        остальное ─► свой агент (короткая история, без памяти Hermes)
+                     └ память, напоминания, Telegram, «в фоне» ─► Hermes
+    """
     fast = await router.try_fast(text, device)
     if fast is not None:
         reply, tools = fast.text, [fast.tool]
     else:
+        asked_background = conflicts.wants_background(text)
         # На время хода MCP-инструменты играют и ставят таймеры на этом устройстве.
         with devices.turn(device):
-            if settings.agent_backend == "hermes" and settings.llm_mode != "local":
-                try:
-                    reply, tools = await run_hermes(session_id, text, progress)
-                except Exception:
-                    # Кончились деньги у провайдера Hermes, он лёг — Джарвис не немеет:
-                    # отвечает свой агент (облако LLM_*, не ответило — локальная модель).
-                    logger.exception("Hermes не ответил — отвечает запасной агент")
-                    reply, tools = await run_agent(_sessions.setdefault(session_id, []), text)
-            else:
-                reply, tools = await run_agent(_sessions.setdefault(session_id, []), text)
+            try:
+                async with asyncio.timeout(None if asked_background else settings.foreground_limit_seconds):
+                    reply, tools = await _think(session_id, text, progress, asked_background)
+            except TimeoutError:
+                logger.warning("«%s» не уложился в %.0f с — отменён", text, settings.foreground_limit_seconds)
+                reply, tools = _TOO_SLOW, []
     return reply, tools, await speech.speak(reply, inline) if speak else None
 
 
+async def _think(
+    session_id: str, text: str, progress: Callable[[str], None], asked_background: bool,
+) -> tuple[str, list[str]]:
+    history = _sessions.setdefault(session_id, [])
+    hermes = settings.agent_backend == "hermes" and settings.llm_mode != "local"
+    if not hermes:
+        return await run_agent(history, text)
+    if not (asked_background or router.needs_hermes(text)):
+        try:
+            return await run_agent(history, text, fallback_local=False)
+        except CloudUnavailable as exc:
+            # Облако своего агента не отвечает (нет ключа, кончились деньги) —
+            # отвечает Hermes, как раньше.
+            logger.warning("Свой агент без облака (%s) — отвечает Hermes", exc)
+    try:
+        return await run_hermes(session_id, text, progress)
+    except Exception:
+        # Hermes лёг, ничего не успев сделать (сделанное он возвращает как
+        # ответ, services/hermes.py), — Джарвис не немеет: свой агент.
+        logger.exception("Hermes не ответил — отвечает запасной агент")
+        return await run_agent(history, text)
+
+
 _ACK_ASKED = "Хорошо, займусь в фоне и скажу, когда будет готово."
-_ACK_SLOW = "Это займёт время. Скажу, когда будет готово."
 
 # Фоновые продолжения ходов asus — ссылки, чтобы задачи не собрал GC.
 _background: set[asyncio.Task[None]] = set()
@@ -149,17 +175,16 @@ _background: set[asyncio.Task[None]] = set()
 async def _start_turn(
     turn_id: str, session_id: str, device: str, text: str, speak: bool, inline: bool,
 ) -> tuple[Turn, str | None]:
-    """Запустить ход и подождать его в пределах бюджета основного плана.
-    Вторым — подтверждение для пользователя, если ход ушёл в фон, иначе None."""
+    """Запустить ход. В фон — только по просьбе («…в фоне»): тогда вторым
+    идёт подтверждение для пользователя, иначе None."""
     turn = turns.start(
         turn_id, session_id, device, text,
         lambda progress: _answer(session_id, text, device, speak, inline, progress),
     )
-    asked = conflicts.wants_background(text)
-    if await turns.within(turn, 0 if asked else settings.foreground_budget_seconds):
+    if not conflicts.wants_background(text):
         return turn, None
     turns.demote(turn)
-    return turn, _ACK_ASKED if asked else _ACK_SLOW
+    return turn, _ACK_ASKED
 
 
 async def _finish_turn(turn: Turn) -> tuple[str, list[str], Spoken | None] | None:

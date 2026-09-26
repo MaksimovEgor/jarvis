@@ -2,6 +2,7 @@
 import { computed, ref, toRef } from 'vue'
 
 import { useCoverColor } from '../composables/useCoverColor'
+import { useSwipe } from '../composables/useSwipe'
 import type { FromWhere, Panel, Rating, TrackMeta } from '../types'
 import CoverArt from './CoverArt.vue'
 import LyricsView from './LyricsView.vue'
@@ -68,40 +69,50 @@ function clock(seconds: number): string {
   return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
 }
 
-function onSeek(e: MouseEvent): void {
-  if (props.live || !props.duration) return
+// Перемотка пальцем: полоску можно тянуть, время меняется под пальцем,
+// а плеер перематывается, когда палец отпустили.
+const scrub = ref<number | null>(null)
+const shown = computed(() => scrub.value ?? progress.value)
+
+function scrubTo(e: PointerEvent): void {
   const { left, width } = (e.currentTarget as HTMLElement).getBoundingClientRect()
-  emit('seek', ((e.clientX - left) / width) * props.duration)
+  scrub.value = Math.min(1, Math.max(0, (e.clientX - left) / width))
 }
 
-// Свайп вниз закрывает экран, как в Яндекс Музыке.
-const dragY = ref(0)
-let startY: number | null = null
-
-function onTouchStart(e: TouchEvent): void {
-  startY = e.touches[0].clientY
+function onScrubStart(e: PointerEvent): void {
+  if (props.live || !props.duration) return
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  scrubTo(e)
 }
 
-function onTouchMove(e: TouchEvent): void {
-  if (startY === null) return
-  dragY.value = Math.max(0, e.touches[0].clientY - startY)
+function onScrubMove(e: PointerEvent): void {
+  if (scrub.value !== null) scrubTo(e)
 }
 
-function onTouchEnd(): void {
-  if (dragY.value > 110) emit('close')
-  dragY.value = 0
-  startY = null
+function onScrubEnd(): void {
+  if (scrub.value === null) return
+  emit('seek', scrub.value * props.duration)
+  scrub.value = null
 }
+
+// Свайп вниз закрывает экран, вбок по обложке — листает треки, как в Яндекс Музыке.
+const swipe = useSwipe({
+  left: () => emit('next'),
+  right: () => emit('previous'),
+  down: () => emit('close'),
+  allowX: () => props.panel === 'cover',
+})
 </script>
 
 <template>
   <section
     class="np"
-    :style="{ '--tint': color ?? 'var(--surface-2)', transform: dragY ? `translateY(${dragY}px)` : undefined }"
+    :style="{ '--tint': color ?? 'var(--surface-2)', transform: swipe.dy.value ? `translateY(${swipe.dy.value}px)` : undefined }"
     aria-label="Сейчас играет"
-    @touchstart.passive="onTouchStart"
-    @touchmove.passive="onTouchMove"
-    @touchend="onTouchEnd"
+    @touchstart.passive="swipe.onTouchStart"
+    @touchmove.passive="swipe.onTouchMove"
+    @touchend="swipe.onTouchEnd"
+    @touchcancel="swipe.onTouchEnd"
   >
     <div class="np__bg" :style="meta.cover ? { backgroundImage: `url(${meta.cover})` } : undefined" />
 
@@ -139,7 +150,15 @@ function onTouchEnd(): void {
     <LyricsView v-if="panel === 'lyrics'" class="np__panel" :track-ref="trackRef" :position="position" @seek="(t) => emit('seek', t)" />
     <QueueView v-else-if="panel === 'queue'" class="np__panel" :version="queueVersion" />
 
-    <CoverArt v-if="panel === 'cover'" class="np__cover" :src="meta.cover" :crop="meta.coverCrop" :live="live" />
+    <CoverArt
+      v-if="panel === 'cover'"
+      class="np__cover"
+      :class="{ 'np__cover--drag': swipe.dx.value }"
+      :style="swipe.dx.value ? { transform: `translateX(${swipe.dx.value}px) rotate(${swipe.dx.value / 40}deg)` } : undefined"
+      :src="meta.cover"
+      :crop="meta.coverCrop"
+      :live="live"
+    />
 
     <div v-if="panel === 'cover'" class="np__meta">
       <button v-if="rateable" class="np__round" aria-label="Не нравится" @click="emit('dislike')">
@@ -175,11 +194,28 @@ function onTouchEnd(): void {
     </div>
 
     <template v-if="!live">
-      <div class="np__bar" @click="onSeek">
-        <i :style="{ width: `${progress * 100}%` }" />
+      <div
+        class="np__bar"
+        :class="{ 'np__bar--active': scrub !== null }"
+        role="slider"
+        aria-label="Перемотка"
+        :aria-valuemin="0"
+        :aria-valuemax="Math.round(duration)"
+        :aria-valuenow="Math.round(shown * duration)"
+        :aria-valuetext="clock(shown * duration)"
+        tabindex="0"
+        @touchstart.stop
+        @pointerdown="onScrubStart"
+        @pointermove="onScrubMove"
+        @pointerup="onScrubEnd"
+        @pointercancel="scrub = null"
+        @keydown.left.prevent="emit('seekBy', -10)"
+        @keydown.right.prevent="emit('seekBy', 10)"
+      >
+        <i :style="{ width: `${shown * 100}%` }" />
       </div>
       <div class="np__times">
-        <span>{{ clock(position) }}</span>
+        <span>{{ clock(scrub !== null ? scrub * duration : position) }}</span>
         <span>{{ loading ? 'загрузка…' : duration ? `−${clock(duration - position)}` : '' }}</span>
       </div>
     </template>
@@ -317,6 +353,11 @@ function onTouchEnd(): void {
     margin: clamp(8px, 2.5dvh, 24px) auto 0;
     border-radius: 18px;
     box-shadow: 0 24px 60px rgb(0 0 0 / 55%);
+    transition: transform 0.25s;
+
+    &--drag {
+      transition: none;
+    }
   }
 
   &__meta {
@@ -394,20 +435,32 @@ function onTouchEnd(): void {
     }
   }
 
-  // Высокая зона клика вокруг тонкой полоски.
+  // Зона касания 44 px (минимум Apple для пальца) вокруг тонкой полоски;
+  // пока тянут — полоска толще, бегунок крупнее.
   &__bar {
     position: relative;
-    height: 20px;
-    margin-top: 12px;
+    height: 44px;
+    margin-top: 2px;
     cursor: pointer;
+    touch-action: none;
 
     &::before,
     i {
       position: absolute;
       left: 0;
-      top: 8px;
-      height: 4px;
-      border-radius: 2px;
+      top: 19px;
+      height: 6px;
+      border-radius: 3px;
+      transition:
+        top 0.15s,
+        height 0.15s;
+    }
+
+    &--active::before,
+    &--active i {
+      top: 17px;
+      height: 10px;
+      border-radius: 5px;
     }
 
     &::before {
@@ -423,12 +476,14 @@ function onTouchEnd(): void {
       &::after {
         content: '';
         position: absolute;
-        right: -6px;
-        top: -4px;
-        width: 12px;
-        height: 12px;
+        right: -9px;
+        top: 50%;
+        width: 18px;
+        height: 18px;
         border-radius: 50%;
         background: #e7ecf2;
+        transform: translateY(-50%);
+        box-shadow: 0 1px 4px rgb(0 0 0 / 35%);
       }
     }
   }

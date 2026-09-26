@@ -38,7 +38,7 @@ _BACKGROUND = re.compile(
     r"|\bкогда\s+(?:будет\s+готово|закончишь|разберешься|разберёшься)\b",
     re.IGNORECASE,
 )
-_MEDIA = re.compile(r"\b(включи|поставь|сыграй|играй|запусти|врубай|вруби)\b", re.IGNORECASE)
+_MEDIA = re.compile(r"\b(включи|поставь|сыграй|играй|запусти|врубай|вруби|(?:аудио)?сказк\w*|аудиокниг\w*)\b", re.IGNORECASE)
 _LLM_TIMEOUT = 5.0
 
 _PROMPT = """\
@@ -65,6 +65,11 @@ async def _ask_llm(new: str, running: list[str]) -> list[int]:
 
 def is_just_stop(text: str) -> bool:
     return bool(_JUST_STOP.match(text))
+
+
+def is_media(text: str) -> bool:
+    """Просьба что-то включить — звук у устройства один, последняя побеждает."""
+    return bool(_MEDIA.search(text))
 
 
 def wants_background(text: str) -> bool:

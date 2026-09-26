@@ -70,6 +70,21 @@ def clean_title(title: str) -> str:
     return _TITLE_NOISE.sub("", title).strip() or title
 
 
+_SPOKEN_CUT = re.compile(r"\s*(?:\||/{2,})\s*")
+_EMOJI = re.compile(r"[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F]")
+SPOKEN_TITLE_WORDS = 8
+
+
+def short_title(title: str) -> str:
+    """Название для ответа вслух: без эмодзи и хвостов YouTube («| Сказка для
+    детей. Читает…»), не длиннее SPOKEN_TITLE_WORDS слов. «🚌 Малютка автобус,
+    который боялся темноты — Дональд Биссет | Сказка для детей» → без «| Сказка…»."""
+    text = " ".join(_EMOJI.sub("", clean_title(title)).split())
+    head = _SPOKEN_CUT.split(text, maxsplit=1)[0].strip(" ,.:") or text
+    words = head.split()
+    return " ".join(words[:SPOKEN_TITLE_WORDS]) + ("…" if len(words) > SPOKEN_TITLE_WORDS else "")
+
+
 def split_title(title: str, artist: str | None) -> tuple[str, str | None]:
     """(песня, исполнитель) для экрана: «Foo Fighters - Everlong» → Everlong,
     Foo Fighters; «In The End - Linkin Park» у Linkin Park → In The End."""

@@ -6,9 +6,10 @@
 «включи песню» ждал, пока он доделает прошлую просьбу. Здесь — правила и
 сразу плеер: доли секунды плюс поиск на YouTube.
 
-Не подошло под правила (или быстрый путь ничего не нашёл) — None, реплика
-уходит в Hermes как раньше.
-Правила нарочно узкие: лучше отдать Hermes, чем включить не то.
+Не подошло под правила — None, реплика уходит агенту. Быстрый путь ничего
+не нашёл — так и отвечаем сразу («Нигде ничего не нашлось…»): агент искал
+бы то же самое ещё минуту.
+Правила нарочно узкие: лучше отдать агенту, чем включить не то.
 """
 
 from __future__ import annotations
@@ -26,9 +27,6 @@ from app.timers import timers
 
 
 logger = logging.getLogger("jarvis.router")
-
-# Ответы плеера «ничего не нашёл» — тогда пусть попробует Hermes.
-_NOT_FOUND = ("Не нашёл", "На YouTube ничего", "Нигде ничего")
 
 
 @dataclass
@@ -80,6 +78,15 @@ _COMPOUND = re.compile(
 )
 # «последний/новый выпуск» — нужен свежий ролик канала, это умеет Hermes.
 _NEEDS_AGENT = re.compile(r"\b(?:последн\w*|нов\w*|свеж\w*|сегодняшн\w*|вчерашн\w*)\b")
+
+# Сказка — сразу аудиосказка, без агента: он искал минуту и зачитывал
+# варианты. «Включи сказку про автобус», «сказку про автобус найди»,
+# «найди и включи аудиосказку колобок». «Расскажи сказку» — не сюда (агент).
+_TALE = re.compile(
+    r"^(?:(?:найди|поищи|включи|поставь|запусти|давай|нам|мне|пожалуйста|и|детск\w*|какую-нибудь|аудио)\s+)*"
+    r"(?:аудио)?сказк\w*(?:\s+(?:(?:про|о|об)\s+)?(.+?))?(?:\s+(?:найди|включи|поставь|пожалуйста))?$"
+)
+DEFAULT_TALE = "аудиосказки для детей"
 
 _BOOK = re.compile(r"\b(?:аудио)?книг[ауи]?\b")
 _PODCAST = re.compile(r"\b(?:подкаст\w*|выпуск\w*|лекци\w*|интервью|новост\w*)\b")
@@ -145,6 +152,28 @@ def _clock(seconds: float) -> str:
     return time.strftime("%H:%M", time.localtime(time.time() + seconds))
 
 
+# Что умеет только Hermes («второй мозг»): память и данные хозяина,
+# напоминания, Telegram, долгие задачи. Остальное — быстрый встроенный агент
+# без лишнего контекста.
+_HERMES = re.compile(
+    r"\b(?:гермес\w*|hermes|"
+    r"напомн\w*|напоминани\w*|запомни\w*|помнишь|вспомни\w*|забудь|"
+    r"памят\w*|заметк\w*|запис(?:ь|и|ей|ках?)|почт\w*|письм\w*|календар\w*|встреч\w*|"
+    r"телеграм\w*|telegram|пришли|отправь|перешли|скинь|"
+    r"мо(?:и|ей|ем|ём|их|я|е|ю)\s+(?:данн\w*|файл\w*|документ\w*|задач\w*|дел\w*|покупк\w*|машин\w*)|"
+    r"кажд\w+\s+(?:день|утро|вечер|час|неделю|понедельник\w*)|по\s+расписанию|"
+    r"расшифруй|перескажи\s+(?:видео|подкаст|запись)|"
+    r"разберись|покопайся|исследуй|подробн\w*\s+(?:разбор|отчет|отчёт))",
+    re.IGNORECASE,
+)
+
+
+def needs_hermes(text: str) -> bool:
+    """Реплике нужен Hermes (память, напоминания, Telegram, долгое), а не
+    быстрый агент."""
+    return bool(_HERMES.search(_normalize(text)))
+
+
 def is_player_command(text: str) -> bool:
     """Команда плееру («включи X», пауза, громче…) — для каналов без устройства
     (Telegram /local): сказать «не знаю, где включить», а не отдавать модели."""
@@ -175,9 +204,13 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
         return FastReply("Вернулся на облачную модель.", "llm_mode")
     if not devices.is_web(device):
         return None  # asus — сервер, играть там нечему; пусть ответит Hermes
+    player = devices.player_for(device)
+    if (m := _TALE.match(t)) and not _COMPOUND.search(m.group(1) or ""):
+        query = f"сказка {m.group(1)}" if m.group(1) else DEFAULT_TALE
+        reply = await player.play_query(query, "audiobook")
+        return FastReply(reply, "play_music")
     if _COMPOUND.search(t):
         return None
-    player = devices.player_for(device)
 
     if _PAUSE.match(t):
         return FastReply(await player.pause(), "pause")
@@ -223,7 +256,7 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
             reply = await player.play_radio(None, genre, None)
         else:
             reply = await player.play_radio(rest, None, None)
-        return None if reply.startswith(_NOT_FOUND) else FastReply(reply, "play_radio")
+        return FastReply(reply, "play_radio")
 
     if _LIKED.match(t):
         return FastReply(await player.play_liked(), "play_liked")
@@ -238,6 +271,6 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
         if kind == "audiobook":
             query = _BOOK.sub(" ", query).strip() or query
         reply = await player.play_query(query, kind)
-        return None if reply.startswith(_NOT_FOUND) else FastReply(reply, "play_music")
+        return FastReply(reply, "play_music")
 
     return None

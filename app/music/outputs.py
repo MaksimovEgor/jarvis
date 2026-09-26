@@ -23,7 +23,7 @@ from collections import deque
 from typing import Any, Awaitable, Callable
 
 from app.config import settings
-from app.music import media, sources
+from app.music import media, sources, youtube
 from app.music.models import Track
 from app.music.mpv import MPV
 
@@ -36,6 +36,8 @@ EndHandler = Callable[[str], Awaitable[None]]  # reason: "eof" | "error" | "stal
 BOOT = uuid.uuid4().hex[:8]
 # Столько хранятся события хода для повтора переподключившемуся браузеру.
 REPLAY_SECONDS = 600
+# Длинное без HLS (Safari) — качаем целиком: книга на час — десятки МБ.
+LONG_DOWNLOAD_SECONDS = 600
 
 
 class Output(ABC):
@@ -286,7 +288,17 @@ class WebOutput(Output):
 
     async def _src(self, track: Track) -> str:
         if track.source == "youtube" and track.is_long:
-            return f"media/hls/{track.ref}/index.m3u8" if self._hls else f"media/yt/{track.ref}"
+            if not self._hls:
+                return f"media/yt/{track.ref}"
+            try:
+                await youtube.hls_segments(track.ref)
+                return f"media/hls/{track.ref}/index.m3u8"
+            except RuntimeError as exc:
+                # HLS у видео нет (у сказок и коротких книг бывает только
+                # DASH) — Safari сырой DASH не играет, качаем файл целиком.
+                logger.info("%s: нет HLS у %s (%s) — качаю файлом", self.device, track.ref, exc)
+                await sources.download(track, timeout=LONG_DOWNLOAD_SECONDS)
+                return f"media/file/{track.ref}"
         if sources.is_downloadable(track):
             # Песня — сначала на диск (~1-3 с): исправленный yt-dlp файл или
             # MP3/FLAC Яндекса iPhone играет, а сырой поток YouTube (DASH) — нет.
