@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # DeepSeek по умолчанию; смена провайдера — это смена трёх переменных.
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-flash"  # deepseek-chat DeepSeek убрал (2026)
 
     # Кто отвечает на реплику: "hermes" — основной профиль Hermes Agent на
     # этом же сервере (память, скиллы, Telegram), "builtin" — свой агентный цикл

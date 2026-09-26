@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterator
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.config import settings
+from app.music import sources
 from app.music.library import library
 from app.music.models import Track
 from app.music.outputs import Output
@@ -21,6 +23,8 @@ def music_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
     monkeypatch.setattr(settings, "dj_hermes_api_key", "")
     library.close()
     monkeypatch.setattr(library, "path", tmp_path / "library.db")
+    # Плеер сам досыпает похожие к концу очереди — в тестах без сети.
+    monkeypatch.setattr(sources, "similar", AsyncMock(return_value=[]))
     yield tmp_path
     library.close()
 

@@ -100,7 +100,13 @@ async def warmup() -> None:
 
 
 def _transcribe_sync(path: Path) -> str:
-    audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+    try:
+        audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+    except Exception as exc:
+        # Пустая/оборванная запись (iPhone отпустил микрофон раньше времени) —
+        # это «не расслышал», а не ошибка на экране.
+        logger.warning("Запись не декодируется (%s): %s", path.stat().st_size if path.exists() else "?", exc)
+        return ""
     recognize = _model()
     if settings.stt_engine == "whisper":
         return recognize(audio).strip()

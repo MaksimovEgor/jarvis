@@ -41,3 +41,28 @@ async def test_ui_tap_cancels_voice_play_requests() -> None:
     await asyncio.sleep(0)
     assert voice.task.cancelled() and not other.task.done()
     other.task.cancel()
+
+
+async def test_device_of_turn_is_exact_for_own_agent_and_latest_for_mcp() -> None:
+    from app.music import devices
+
+    phone, mac = "web:phone-test-01", "web:mac-test-0001"
+    seen_by_phone: list[str | None] = []
+
+    async def phone_turn(started: asyncio.Event, release: asyncio.Event) -> None:
+        with devices.turn(phone):
+            started.set()
+            await release.wait()
+            seen_by_phone.append(devices.current_device())
+
+    started, release = asyncio.Event(), asyncio.Event()
+    task = asyncio.create_task(phone_turn(started, release))
+    await started.wait()
+    with devices.turn(mac):
+        # MCP-запрос Hermes идёт вне задач ходов — видит последний начатый.
+        assert await asyncio.create_task(asyncio.to_thread(devices.current_device)) == mac
+    # Ход Mac кончился, ход телефона идёт — MCP видит телефон, а не «никого».
+    assert devices._turns == [phone]
+    release.set()
+    await task
+    assert seen_by_phone == [phone]

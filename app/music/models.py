@@ -70,7 +70,7 @@ def clean_title(title: str) -> str:
     return _TITLE_NOISE.sub("", title).strip() or title
 
 
-_SPOKEN_CUT = re.compile(r"\s*(?:\||/{2,})\s*")
+_SPOKEN_CUT = re.compile(r"\s*(?:\||/{2,}|\s\*+(?:\s|$))\s*")
 _EMOJI = re.compile(r"[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F]")
 SPOKEN_TITLE_WORDS = 8
 

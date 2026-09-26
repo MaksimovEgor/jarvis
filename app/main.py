@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from os import PathLike
@@ -158,12 +159,30 @@ async def _think(
             # отвечает Hermes, как раньше.
             logger.warning("Свой агент без облака (%s) — отвечает Hermes", exc)
     try:
-        return await run_hermes(session_id, text, progress)
+        return await run_hermes(session_id, _with_recent(session_id, text), progress)
     except Exception:
         # Hermes лёг, ничего не успев сделать (сделанное он возвращает как
         # ответ, services/hermes.py), — Джарвис не немеет: свой агент.
         logger.exception("Hermes не ответил — отвечает запасной агент")
         return await run_agent(history, text)
+
+
+# Hermes не видит, что отвечали быстрый путь и свой агент: «какая погода?» →
+# «запомни это» пришло бы к нему без контекста. Прикладываем последние реплики.
+RECENT_TURNS = 3
+RECENT_SECONDS = 30 * 60
+
+
+def _with_recent(session_id: str, text: str) -> str:
+    now = time.time()
+    recent = [
+        e for e in history.load(session_id, RECENT_TURNS)
+        if e.get("reply") and not e.get("cancelled") and now - e.get("ts", 0) < RECENT_SECONDS
+    ]
+    if not recent:
+        return text
+    lines = "\n".join(f"— Хозяин: {e['user']}\n— Джарвис: {e['reply']}" for e in recent)
+    return f"(Только что в разговоре, для контекста:\n{lines})\n\n{text}"
 
 
 _ACK_ASKED = "Хорошо, займусь в фоне и скажу, когда будет готово."

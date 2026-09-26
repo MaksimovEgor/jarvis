@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from app.music import taste, wave, youtube
+from app.music import sources, taste, wave, youtube
 from app.music.library import library
 from app.music.player import Player
 from tests.conftest import FakeOutput, yt
@@ -94,7 +94,7 @@ async def test_mix_filters_banned(monkeypatch: pytest.MonkeyPatch) -> None:
     async def mix(seed):
         return [yt("bad"), yt("ok")]
 
-    monkeypatch.setattr(youtube, "mix", mix)
+    monkeypatch.setattr(sources, "similar", mix)
     player, _ = await _player("a")
     await player._extend_with_mix(player.current, player._generation)
     assert [t.ref for t in player._queue] == ["a", "ok"]

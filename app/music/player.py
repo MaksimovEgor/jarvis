@@ -56,6 +56,13 @@ SKIP_BEFORE = 30.0
 WAVE_DOWNLOAD_TIMEOUT = 25.0
 # Исполнитель с таким числом дизлайков убирается из уже собранной очереди.
 ARTIST_BAN_DISLIKES = 2
+# Песни не по волне: впереди меньше стольких — досыпать похожих на текущую.
+# Раньше микс кончался (~20 треков), и музыка молча замолкала.
+MIX_REFILL_BELOW = 2
+# Нашли, но ни один из кандидатов не загрузился (YouTube не отдал, сеть).
+# Ответ, а не исключение: иначе быстрый путь отдавал реплику агенту, и тот
+# искал то же самое ещё раз.
+_NOT_LOADED = "Нашёл «{}», но не получилось загрузить. Попробуй ещё раз или скажи иначе."
 # Почему выход закончил трек → исход в журнале.
 _END_OUTCOME: dict[str, Outcome] = {"eof": "finished", "error": "error", "stall": "stalled"}
 
@@ -88,6 +95,16 @@ def _display(track: Track) -> dict[str, Any]:
             "coverCrop": track.source == "youtube", "service": sources.SERVICE_LABEL[track.service], "note": note}
 
 
+# Книга/подкаст из каталога Яндекса — только если похожа на запрос: каталог
+# отдаёт что-то всегда («сказка про автобус» → «Двенадцать месяцев»).
+CATALOG_MATCH = 0.5
+
+
+def _matches(query: str, entity: Entity) -> bool:
+    probe = Track(title=entity.title, source="yandex", ref=entity.id, artist=entity.subtitle or None)
+    return sources.match_score(query, probe) >= CATALOG_MATCH
+
+
 def _journaled(track: Track) -> bool:
     """В журнал и оценки — только песни: у радио и файлов нет id, книги
     оценивать бессмысленно."""
@@ -113,6 +130,7 @@ class Player:
         self._autosave: asyncio.Task[None] | None = None
         self.wave: Wave | None = None
         self._refilling = False
+        self._mixing = False
         self._play_id: int | None = None
 
     @property
@@ -226,6 +244,8 @@ class Player:
                 self.output.prefetch(self._queue[i + 1])
             if self.wave is not None:
                 asyncio.create_task(self._refill(self._generation))
+            elif _journaled(track) and len(self._queue) - i - 1 < MIX_REFILL_BELOW:
+                asyncio.create_task(self._extend_with_mix(track, self._generation))
             logger.info("%s играет: %s", self.device, track.title)
             return track
         raise RuntimeError("не получилось загрузить ни один трек")
@@ -266,16 +286,23 @@ class Player:
         return [t for t in tracks if t.ref not in banned and artist_key(t.artist) not in artists]
 
     async def _extend_with_mix(self, seed: Track, generation: int) -> None:
+        if self._mixing:
+            return
+        self._mixing = True
         try:
             tracks = self._playable(await sources.similar(seed))
         except Exception:
             logger.exception("Не получилось получить микс для «%s»", seed.title)
             return
+        finally:
+            self._mixing = False
         async with self._lock:
             if generation != self._generation:
                 return
             was_last = self._pos == len(self._queue) - 1
-            self._queue.extend(replace(t, origin="mix") for t in tracks)
+            # Без повторов: второй микс похожих частично совпадает с первым.
+            queued = {t.ref for t in self._queue}
+            self._queue.extend(replace(t, origin="mix") for t in tracks if t.ref not in queued)
             if was_last and self._pos + 1 < len(self._queue):
                 self.output.prefetch(self._queue[self._pos + 1])
             self._publish_upcoming()
@@ -317,19 +344,27 @@ class Player:
             except Exception:
                 logger.warning("Яндекс не нашёл книгу/подкаст «%s»", query, exc_info=True)
                 sections = []
-            found = next((e for sec in sections for e in sec.items if e.source == "yandex"), None)
+            found = next((
+                e for sec in sections for e in sec.items
+                if e.source == "yandex" and _matches(query, e)
+            ), None)
             if found is not None:
                 return await self.play_entity(found)
+        # Поиск — секунды сети; не под lock, иначе «следующий» и «стоп»
+        # ждали бы его, а старый трек доигрывает, пока ищем новый.
+        candidates = await sources.resolve(query, kind)
+        if kind == "music":
+            candidates = self._playable(candidates)
+        if not candidates:
+            return f"Нигде ничего не нашлось по запросу «{query}»."
         async with self._lock:
-            candidates = await sources.resolve(query, kind)
-            if kind == "music":
-                candidates = self._playable(candidates)
-            if not candidates:
-                return f"Нигде ничего не нашлось по запросу «{query}»."
             self.wave = None
             # Первый, что загрузится (_play_index пропускает недоступные);
             # остальные кандидаты в очереди не нужны — дальше пойдёт микс.
-            track = await self._start_queue(candidates[:MAX_SKIPS])
+            try:
+                track = await self._start_queue(candidates[:MAX_SKIPS])
+            except RuntimeError:
+                return _NOT_LOADED.format(query)
             self._queue, self._pos = [track], 0
             generation = self._generation
         if kind == "music":
@@ -370,7 +405,10 @@ class Player:
         random.shuffle(tracks)
         async with self._lock:
             self.wave = None
-            track = await self._start_queue(tracks)
+            try:
+                track = await self._start_queue(tracks)
+            except RuntimeError:
+                return _NOT_LOADED.format("мои лайки")
         return f"Включаю твои лайки: {short_title(track.title)}, всего {len(tracks)}."
 
     async def play_ref(self, ref: str) -> str:
@@ -402,7 +440,10 @@ class Player:
             self.wave = None
             # Остальные найденные станции — в очередь: «следующая» переключит
             # на похожую, а битый поток сам пропустится.
-            track = await self._start_queue(stations)
+            try:
+                track = await self._start_queue(stations)
+            except RuntimeError:
+                return _NOT_LOADED.format(name or genre or "радио")
         return f"Включаю радио {short_title(track.title)}."
 
     async def play_local(self, query: str) -> str:

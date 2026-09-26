@@ -25,7 +25,9 @@ from pathlib import Path
 
 from app.services import tts
 
-FIRST_CHARS = 100
+# Первый кусок короткий: 60 символов синтезируются ~1,2 с — голос начинается
+# почти сразу (100 символов было ~2,4 с).
+FIRST_CHARS = 60
 MAX_CHARS = 400
 # Вслух — не больше ~30 секунд: длинный ответ целиком остаётся на экране.
 SPOKEN_MAX_CHARS = 450

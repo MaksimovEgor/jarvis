@@ -144,3 +144,13 @@ async def test_weather_text(monkeypatch: pytest.MonkeyPatch) -> None:
         "сегодня: от 8° до 15°, небольшой дождь, вероятность осадков 20%.",
         "завтра: от 9° до 16°, ясно.",
     ]
+
+
+async def test_hermes_gets_recent_context(backends: dict[str, AsyncMock], monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from app import history
+
+    monkeypatch.setattr(history, "STORE", tmp_path)
+    history.append("ctx", "какая погода", "Одиннадцать градусов, пасмурно.", ["weather"])
+    await main._think("ctx", "запомни это", lambda _: None, False)
+    sent = backends["hermes"].await_args.args[1]
+    assert "какая погода" in sent and "Одиннадцать градусов" in sent and sent.endswith("запомни это")
