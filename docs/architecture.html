@@ -467,6 +467,8 @@ flowchart LR
     <section id="hermes">
       <h2>Hermes и MCP-инструменты</h2>
       <p class="sub">Джарвис для Hermes — только «уши и рот». История разговора хранится в Hermes, ядро шлёт одну новую реплику и голосовые правила (<code>VOICE_INSTRUCTIONS</code>: 1–3 предложения, без markdown, числа словами, имена MCP-инструментов, чтобы не тратить шаг на tool_search).</p>
+      <p class="sub">Инструменты Hermes для голоса и веб-чата (<code>platform_toolsets.api_server</code>, ставит <code>scripts/hermes-harden/apply.sh</code>): MCP jarvis, веб-поиск, память, история, скиллы, todo. Без terminal, файлов, code_execution, браузера, cron и субагентов: голос читает веб, и prompt injection со страницы не должен дотянуться до команд на asus. Задачи с терминалом — только из CLI/TUI на asus. Сломанный YAML Hermes трактует как «набор по умолчанию» (полный), поэтому скрипт после записи сверяет итоговый список.</p>
+      <p class="sub">Cron «Сервер: ежедневная сводка 09:00» (<code>scripts/hermes-digest/</code>): пороги, известный шум и повторы проверяет <code>server-digest.py</code>, состояние между запусками — в <code>~/.hermes/scripts/.server-digest.state.json</code>. Всё в норме → пустой stdout → Hermes модель не зовёт (0 токенов). Есть новое или хуже → агент без инструментов (<code>enabled_toolsets: todo, no_mcp</code>, reasoning low) пишет 2–5 строк в Telegram. Раньше агент с terminal и <code>context_from: self</code> сам расследовал сервер: 145–260k токенов в день.</p>
       <div class="diagram"><pre class="mermaid">
 flowchart TD
   S["run_hermes(session, text)"] --> C{"последняя реплика<br/>больше 10 мин назад?"}
