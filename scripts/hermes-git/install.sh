@@ -2,8 +2,8 @@
 # История конфигурации Hermes: локальный git + снимок раз в час. Вместо *.bak.* рядом с конфигами.
 # Запуск с Mac:
 #   scp scripts/hermes-git/snapshot.sh asus:/tmp/hermes-snapshot.sh && ssh asus 'bash -s' < scripts/hermes-git/install.sh
-# Смотреть:  ssh asus 'hermes-git log --stat -5'      (обёртка над git с нужными --git-dir/--work-tree)
-# Откатить файл:  ssh asus 'hermes-git checkout <commit> -- config.yaml'
+# Смотреть:  ssh asus '~/.local/bin/hermes-git log --stat -5'      (обёртка над git с нужными --git-dir/--work-tree)
+# Откатить файл:  ssh asus '~/.local/bin/hermes-git checkout <commit> -- config.yaml'
 # Удалить всё:    systemctl --user disable --now hermes-snapshot.timer; rm -rf ~/.hermes-history ~/.hermes/.history
 #
 # Git-каталог лежит отдельно (~/.hermes-history), в ~/.hermes нет .git — Hermes и профиль coder
@@ -61,6 +61,7 @@ cat > ~/.local/bin/hermes-git <<EOF
 exec git --git-dir="$H" --work-tree="\$HOME/.hermes" "\$@"
 EOF
 chmod 755 ~/.local/bin/hermes-git
+HG=~/.local/bin/hermes-git  # в `ssh asus bash -s` ~/.local/bin нет в PATH
 
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/hermes-snapshot.service <<EOF
@@ -88,8 +89,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now hermes-snapshot.timer
 
 "$H/snapshot.sh" "начальный снимок"
-echo "--- в истории: $(hermes-git ls-files | wc -l) файлов, $(du -sh "$H" | cut -f1)"
-hermes-git ls-files | awk -F/ '{print ($1=="skills"||($1=="profiles"&&$3=="skills")) ? "(скиллы)" : $0}' | sort | uniq -c | sort -rn | head -20
+echo "--- в истории: $("$HG" ls-files | wc -l) файлов, $(du -sh "$H" | cut -f1)"
+"$HG" ls-files | awk -F/ '{print ($1=="skills"||($1=="profiles"&&$3=="skills")) ? "(скиллы)" : $0}' | sort | uniq -c | sort -rn | head -20
 echo "--- таймер:"
 systemctl --user list-timers hermes-snapshot.timer --no-pager | head -2
 echo "--- старые бэкапы рядом с конфигами (теперь не нужны, удалить — вручную):"
