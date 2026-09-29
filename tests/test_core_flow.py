@@ -11,6 +11,7 @@ from app.agent import orchestrator, router
 from app.agent.orchestrator import CloudUnavailable
 from app.config import settings
 from app.services import hermes, speech
+from app.services.speech import Spoken
 
 
 @pytest.mark.parametrize("text", [
@@ -154,3 +155,83 @@ async def test_hermes_gets_recent_context(backends: dict[str, AsyncMock], monkey
     await main._think("ctx", "запомни это", lambda _: None, False)
     sent = backends["hermes"].await_args.args[1]
     assert "какая погода" in sent and "Одиннадцать градусов" in sent and sent.endswith("запомни это")
+
+
+# --- растущая озвучка: голос с первой фразы, текст — потом ---------------------
+
+@pytest.fixture
+def fast_synth(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def synth(text: str) -> bytes:
+        return text.encode()
+
+    monkeypatch.setattr(speech, "_synth", synth)
+    monkeypatch.setattr(router, "try_fast", AsyncMock(return_value=None))
+
+
+def _agent_saying(*sentences: str, reply: str | None = None, tools: list[str] | None = None):
+    async def agent(_history: object, _text: str, **kw: object) -> tuple[str, list[str]]:
+        for s in sentences:
+            kw["on_sentence"](s)  # type: ignore[operator]
+        return (reply if reply is not None else " ".join(sentences)), tools or []
+    return agent
+
+
+async def test_stream_speech_emitted_before_reply(backends: dict[str, AsyncMock], fast_synth: None) -> None:
+    backends["agent"].side_effect = _agent_saying("Небо голубое.", "Из-за рассеяния.")
+    opened: list[Spoken] = []
+    reply, _, spoken = await main._answer("s", "почему небо голубое", "web:core-test-01", True, False,
+                                          lambda _: None, opened.append)
+    assert reply == "Небо голубое. Из-за рассеяния."
+    assert len(opened) == 1 and spoken is not None and spoken.job_id == opened[0].job_id
+    assert speech._jobs[spoken.job_id].chunks[0] == "Небо голубое."
+
+
+async def test_other_reply_is_appended_to_stream(backends: dict[str, AsyncMock], fast_synth: None) -> None:
+    # Вступление прозвучало, а итог другой («Готово.» после инструмента) — договорить его.
+    backends["agent"].side_effect = _agent_saying("Сейчас включу.", reply="Готово.", tools=["music"])
+    _, _, spoken = await main._answer("s", "включи что-нибудь", "web:core-test-01", True, False,
+                                      lambda _: None, lambda _: None)
+    assert spoken is not None
+    assert speech._jobs[spoken.job_id].chunks == ["Сейчас включу.", "Готово."]
+
+
+async def test_hermes_path_does_not_stream(backends: dict[str, AsyncMock], fast_synth: None) -> None:
+    opened: list[Spoken] = []
+    reply, _, spoken = await main._answer("s", "напомни в 9 про встречу", "web:core-test-01", True, False,
+                                          lambda _: None, opened.append)
+    assert reply == "гермес" and not opened
+    assert spoken is not None and spoken.count == 1
+
+
+async def test_cancel_closes_stream(backends: dict[str, AsyncMock], fast_synth: None) -> None:
+    started = asyncio.Event()
+
+    async def agent(_h: object, _t: object, **kw: object) -> tuple[str, list[str]]:
+        kw["on_sentence"]("Начинаю длинный ответ.")  # type: ignore[operator]
+        started.set()
+        await asyncio.sleep(10)
+        return "", []
+
+    backends["agent"].side_effect = agent
+    opened: list[Spoken] = []
+    task = asyncio.create_task(main._answer("s", "расскажи длинно", "web:core-test-01", True, False,
+                                            lambda _: None, opened.append))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Экран не ждёт следующий кусок минуту — озвучка закрыта.
+    assert await asyncio.wait_for(speech.chunk(opened[0].job_id, 1), 1) is None
+
+
+async def test_error_closes_stream(backends: dict[str, AsyncMock], fast_synth: None) -> None:
+    async def agent(_h: object, _t: object, **kw: object) -> tuple[str, list[str]]:
+        kw["on_sentence"]("Начинаю ответ.")  # type: ignore[operator]
+        raise ValueError("битый JSON")
+
+    backends["agent"].side_effect = agent
+    opened: list[Spoken] = []
+    with pytest.raises(ValueError):
+        await main._answer("s", "расскажи", "web:core-test-01", True, False, lambda _: None, opened.append)
+    # Не только отмена: при любой ошибке хода экран не ждёт следующий кусок.
+    assert await asyncio.wait_for(speech.chunk(opened[0].job_id, 1), 1) is None

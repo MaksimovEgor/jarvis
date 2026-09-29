@@ -1,5 +1,7 @@
 import { ref } from 'vue'
 
+import { ensurePlayback } from './useAudioSession'
+
 // 0.1с тишины в WAV — для «разблокировки» элемента.
 export const SILENCE =
   'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='
@@ -47,6 +49,7 @@ export function usePlayer() {
       finish = resolve
       audio.src = url
       isPlaying.value = true
+      ensurePlayback()
       audio.play().catch(done)
     })
   }

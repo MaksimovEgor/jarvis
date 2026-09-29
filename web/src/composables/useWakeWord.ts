@@ -1,11 +1,15 @@
 import { ref } from 'vue'
 
 import { clientLog } from '../api'
+import { releaseMic, takeMic } from './useAudioSession'
 
 const ENABLED_KEY = 'jarvis:wake'
 
-// Как распознаватель пишет «Джарвис» — вариантов несколько.
-const WAKE = /(джарвис|джервис|жарвис|джарвиз|джарвес|jarvis)[\s,.!?:;—-]*/i
+// Как распознаватель пишет «Джарвис»: джарвис, джервис, жарвис, джарвиз,
+// джарвес, джавис, джарви, джэрвис, «джарвиса», дарвис, «джар вис», jarvis.
+// Только целым словом — иначе «обжарив» или «жаворонок» будили бы Джарвиса.
+const WAKE =
+  /(?:(?<![а-яё])(?:д?ж[аеэя]р?в[иеэы][сз]?[а-яё]{0,2}|дарвис|джа рвис|джар вис)(?![а-яё])|jarvis|jervis)[\s,.!?:;—-]*/i
 // iOS заканчивает сессию распознавания сам (тишина, ~минута) — перезапуск.
 const RESTART_MS = 300
 // После «Джарвис» команда собирается, пока человек говорит: закончилась,
@@ -17,7 +21,9 @@ const MAX_COMMAND_MS = 30000
 
 export interface WakeHandlers {
   onAlert: () => void // услышал «Джарвис» — сигнал, приглушить музыку
-  onWake: (command: string) => void // фраза закончилась: команда или '' (только имя)
+  // фраза закончилась: команда или '' (только имя); heardAt — когда распознано
+  // последнее слово (Date.now()), отсчёт задержки ответа — от него, а не от паузы
+  onWake: (command: string, heardAt: number) => void
   onCancel: () => void // тревога ложная — распознаватель передумал
 }
 
@@ -39,6 +45,7 @@ export function useWakeWord(handlers: WakeHandlers) {
   let alerted = false
   let command = ''
   let heardWake = false
+  let lastResultAt = 0
   let pauseTimer: number | null = null
   let maxTimer: number | null = null
 
@@ -55,6 +62,7 @@ export function useWakeWord(handlers: WakeHandlers) {
     if (!alerted) return
     const text = command
     const real = heardWake
+    const heardAt = lastResultAt
     clearAlert()
     if (!real) {
       handlers.onCancel()
@@ -62,7 +70,7 @@ export function useWakeWord(handlers: WakeHandlers) {
     }
     clientLog(`wake: command "${text.slice(0, 80)}"`)
     pause()
-    handlers.onWake(text)
+    handlers.onWake(text, heardAt)
   }
 
   function begin(): void {
@@ -93,6 +101,7 @@ export function useWakeWord(handlers: WakeHandlers) {
         maxTimer = window.setTimeout(finishCommand, MAX_COMMAND_MS)
       }
       heardWake = Boolean(last)
+      lastResultAt = Date.now()
       if (last) command = full.slice((last.index ?? 0) + last[0].length).trim()
       if (pauseTimer !== null) clearTimeout(pauseTimer)
       pauseTimer = window.setTimeout(finishCommand, COMMAND_PAUSE_MS)
@@ -105,6 +114,7 @@ export function useWakeWord(handlers: WakeHandlers) {
     }
     r.onend = () => {
       clientLog(`wake: onend wanted=${wanted} blocked=${blocked.value}`)
+      releaseMic()
       // iOS закрыл сессию посреди команды — дальше текст не придёт, берём что есть.
       if (alerted) finishCommand()
       listening.value = false
@@ -114,9 +124,11 @@ export function useWakeWord(handlers: WakeHandlers) {
 
     try {
       clientLog('wake: start()')
+      takeMic()
       r.start()
     } catch (e) {
       clientLog(`wake: start() threw ${e instanceof Error ? e.message : String(e)}`)
+      releaseMic()
       rec = null
       blocked.value = true
     }

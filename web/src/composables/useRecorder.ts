@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 
+import { releaseMic, takeMic } from './useAudioSession'
 import { audioContext } from './useEarcon'
 
 const PREFERRED_MIME = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus']
@@ -33,9 +34,30 @@ export function useRecorder() {
   let chunks: Blob[] = []
   let vadTimer: number | null = null
   let source: MediaStreamAudioSourceNode | null = null
+  let vadContext: AudioContext | null = null
 
-  function watchSilence(stream: MediaStream, auto: AutoStop): void {
-    const ctx = audioContext()
+  // Анализ тишины — в своём AudioContext, который закрывается после записи:
+  // общий (сигналы) с подключённым микрофоном держал iOS в режиме «звонка» —
+  // музыка потом тихая. Свой контекст вне жеста может не запуститься —
+  // тогда общий, он разблокирован на тапах.
+  async function vadAudioContext(): Promise<AudioContext> {
+    const own = new AudioContext()
+    await Promise.race([own.resume(), new Promise((r) => setTimeout(r, 300))])
+    if (own.state === 'running') {
+      vadContext = own
+      return own
+    }
+    void own.close()
+    return audioContext()
+  }
+
+  async function watchSilence(stream: MediaStream, auto: AutoStop): Promise<void> {
+    const ctx = await vadAudioContext()
+    // Пока контекст запускался, запись могли остановить.
+    if (recorder?.stream !== stream) {
+      stopWatching()
+      return
+    }
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 1024
     source = ctx.createMediaStreamSource(stream)
@@ -85,21 +107,38 @@ export function useRecorder() {
     // записи — Bluetooth не возвращается из «гарнитуры» в стерео.
     source?.disconnect()
     source = null
+    void vadContext?.close()
+    vadContext = null
   }
 
   async function start(auto?: AutoStop): Promise<void> {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    })
-    const mimeType = PREFERRED_MIME.find((m) => MediaRecorder.isTypeSupported(m))
-    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
-    chunks = []
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data)
+    takeMic()
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      })
+    } catch (e) {
+      releaseMic()
+      throw e
     }
-    recorder.start()
+    try {
+      const mimeType = PREFERRED_MIME.find((m) => MediaRecorder.isTypeSupported(m))
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      chunks = []
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data)
+      }
+      recorder.start()
+    } catch (e) {
+      // Иначе микрофон остаётся открытым и iOS не выходит из режима «звонка».
+      stream.getTracks().forEach((t) => t.stop())
+      recorder = null
+      releaseMic()
+      throw e
+    }
     isRecording.value = true
-    if (auto) watchSilence(stream, auto)
+    if (auto) await watchSilence(stream, auto)
   }
 
   function stop(): Promise<Blob> {
@@ -113,6 +152,7 @@ export function useRecorder() {
       rec.onstop = () => {
         // Отпускаем микрофон, иначе на телефоне висит индикатор записи.
         rec.stream.getTracks().forEach((t) => t.stop())
+        releaseMic()
         isRecording.value = false
         recorder = null
         resolve(new Blob(chunks, { type: rec.mimeType }))

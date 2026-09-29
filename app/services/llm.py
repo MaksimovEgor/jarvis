@@ -15,9 +15,10 @@ settings.llm_mode == "local" — сразу локальная (переключ
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -40,11 +41,7 @@ class LLMClient:
         self._timeout = timeout
         self._extra = extra or {}
 
-    async def chat(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
+    def _payload(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
@@ -54,13 +51,21 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        return payload
 
+    def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
 
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(self._endpoint, json=payload, headers=headers)
+            resp = await client.post(self._endpoint, json=self._payload(messages, tools), headers=self._headers())
             resp.raise_for_status()
 
         data = resp.json()
@@ -70,6 +75,65 @@ class LLMClient:
         message = choices[0]["message"]
         if isinstance(message.get("content"), str):
             message["content"] = _THINK.sub("", message["content"]).strip()
+        return message
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        on_text: Callable[[str], None],
+    ) -> dict[str, Any]:
+        """То же, что chat(), но потоком (SSE): текст отдаётся в on_text по мере
+        генерации — озвучка начинается с первой фразы, а не после всего ответа.
+        Возвращает собранное сообщение того же вида, что chat().
+
+        tool_calls приходят кусками: имя и id — в первом, аргументы — строкой
+        по частям; склеиваются по delta.index.
+        """
+        content: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        payload = {**self._payload(messages, tools), "stream": True}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream("POST", self._endpoint, json=payload, headers=self._headers()) as resp:
+                if resp.is_error:
+                    await resp.aread()  # иначе у ошибки не будет текста (402 «нет денег»)
+                    resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError as exc:
+                        raise RuntimeError(f"LLM прислала битый кусок потока: {data[:200]}") from exc
+                    choices = chunk.get("choices") or []
+                    # Ошибку посреди потока (OpenRouter и подобные) провайдер шлёт
+                    # куском, а не статусом: без этого обрывок сошёл бы за ответ.
+                    if chunk.get("error") or any(c.get("finish_reason") == "error" for c in choices):
+                        raise RuntimeError(f"LLM оборвала поток ошибкой: {chunk.get('error') or data[:200]}")
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    if text := delta.get("content"):
+                        content.append(text)
+                        on_text(text)
+                    for part in delta.get("tool_calls") or []:
+                        call = calls.setdefault(part.get("index", 0), {
+                            "id": "", "type": "function", "function": {"name": "", "arguments": ""},
+                        })
+                        call["id"] = part.get("id") or call["id"]
+                        fn = part.get("function") or {}
+                        call["function"]["name"] += fn.get("name") or ""
+                        call["function"]["arguments"] += fn.get("arguments") or ""
+        text = _THINK.sub("", "".join(content)).strip()
+        # Как у chat(): при одних инструментах content — null, не пустая строка.
+        message: dict[str, Any] = {"role": "assistant", "content": text or None}
+        if calls:
+            message["tool_calls"] = [calls[i] for i in sorted(calls)]
+        elif not text:
+            raise RuntimeError("LLM вернул пустой ответ (поток без текста и инструментов)")
         return message
 
 
@@ -103,6 +167,15 @@ class ChainLLM:
         """Только облако, ошибка — наверх: свой агент при отказе сам уходит на
         локальный путь, где инструмент выбирает код (orchestrator.py)."""
         return await self._cloud.chat(messages, tools)
+
+    async def cloud_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        on_text: Callable[[str], None],
+    ) -> dict[str, Any]:
+        """Облако потоком; ошибка — наверх, как у cloud()."""
+        return await self._cloud.stream(messages, tools, on_text)
 
     async def local(
         self,

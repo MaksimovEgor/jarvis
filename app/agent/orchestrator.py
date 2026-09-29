@@ -20,10 +20,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
+from typing import Callable
 
 import httpx
 
-from app.agent.prompts import LOCAL_PROMPT, SYSTEM_PROMPT
+from app import metrics
+from app.agent.prompts import LOCAL_PROMPT, SYSTEM_PROMPT, now_line
 from app.agent.tools import TOOLS, call_tool
 from app.config import settings
 from app.services.llm import get_llm
@@ -63,20 +66,49 @@ LOCAL_CANT_ACT = (
 _FILLER = re.compile(r"^(?:джарвис|jarvis)[,\s]*|^(?:найди|поищи|загугли|узнай)(?:\s+мне)?\s+", re.IGNORECASE)
 
 
+# Конец фразы: знак препинания (и закрывающая кавычка/скобка), за которым пробел.
+# «3.5» и «т.к.» без пробела не режутся.
+_SENTENCE_END = re.compile(r"[.!?…]+[»\")]*\s+")
+
+
+class SentenceSplitter:
+    """Поток текста от LLM → целые фразы, как только они готовы."""
+
+    def __init__(self, on_sentence: Callable[[str], None]) -> None:
+        self._on_sentence = on_sentence
+        self._buffer = ""
+
+    def feed(self, delta: str) -> None:
+        self._buffer += delta
+        while m := _SENTENCE_END.search(self._buffer):
+            sentence, self._buffer = self._buffer[: m.end()].strip(), self._buffer[m.end():]
+            if sentence:
+                self._on_sentence(sentence)
+
+    def flush(self) -> None:
+        """Хвост без точки — в конце шага LLM."""
+        sentence, self._buffer = self._buffer.strip(), ""
+        if sentence:
+            self._on_sentence(sentence)
+
+
 class CloudUnavailable(RuntimeError):
     """Облачная LLM не ответила, а ничего ещё не сделано — ход можно отдать другому."""
 
 
 async def run_agent(
     history: list[dict], user_text: str, local: bool = False, fallback_local: bool = True,
+    on_sentence: Callable[[str], None] | None = None,
 ) -> tuple[str, list[str]]:
     """local — сразу локальная модель на GPU asus, мимо облака (Telegram /local).
     fallback_local=False — облако не ответило: CloudUnavailable вместо локальной
-    модели (ядро тогда отдаёт реплику Hermes)."""
+    модели (ядро тогда отдаёт реплику Hermes).
+    on_sentence — облако отвечает потоком, каждая готовая фраза (в том числе
+    «Сейчас проверю.» перед поиском) уходит сюда сразу; локальная — без потока."""
     if local or settings.llm_mode == "local":
         return await _run_local(history, user_text)
     try:
-        return await _run_cloud(history, user_text)
+        return await _run_cloud(history, user_text, on_sentence)
     except (httpx.HTTPError, RuntimeError) as exc:
         if not fallback_local:
             raise CloudUnavailable(str(exc)) from exc
@@ -100,7 +132,7 @@ async def _run_local(history: list[dict], user_text: str) -> tuple[str, list[str
             f"{user_text}\n\nРезультаты поиска в интернете:\n{found}\n\n"
             "Ответь на вопрос по этим результатам, коротко. Если в них ответа нет — так и скажи."
         )
-    message = await get_llm().local([{"role": "system", "content": LOCAL_PROMPT}, *history, {"role": "user", "content": prompt}])
+    message = await get_llm().local([{"role": "system", "content": LOCAL_PROMPT + now_line(datetime.now())}, *history, {"role": "user", "content": prompt}])
     reply = message.get("content") or ""
     _remember(history, user_text, reply)
     return reply, used
@@ -112,17 +144,29 @@ def _remember(history: list[dict], user_text: str, reply: str) -> None:
     del history[: max(0, len(history) - settings.session_history_limit)]
 
 
-async def _run_cloud(history: list[dict], user_text: str) -> tuple[str, list[str]]:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}]
+async def _run_cloud(
+    history: list[dict], user_text: str, on_sentence: Callable[[str], None] | None = None,
+) -> tuple[str, list[str]]:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + now_line(datetime.now())}, *history, {"role": "user", "content": user_text}]
     llm = get_llm()
     used_tools: list[str] = []
+    splitter = None
+    if on_sentence is not None:
+        def sentence(text: str) -> None:
+            metrics.mark("llm_first")
+            on_sentence(text)
+        splitter = SentenceSplitter(sentence)
 
     for step in range(MAX_TOOL_ITERATIONS):
         # Последний шаг — без инструментов: ответить по тому, что уже нашлось,
         # а не «не получилось разобраться» после минуты поиска.
         last = step == MAX_TOOL_ITERATIONS - 1
         try:
-            message = await llm.cloud(messages, None if last else TOOLS)
+            if splitter is None:
+                message = await llm.cloud(messages, None if last else TOOLS)
+            else:
+                message = await llm.cloud_stream(messages, None if last else TOOLS, splitter.feed)
+                splitter.flush()
         except (httpx.HTTPError, RuntimeError):
             if not used_tools:
                 raise

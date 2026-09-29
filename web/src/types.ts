@@ -1,5 +1,14 @@
 export type Status = 'idle' | 'recording' | 'thinking' | 'speaking'
 
+// Задержки хода (app/metrics.py): этапы на ядре + первый звук, замеренный экраном.
+export interface TurnTiming {
+  kind?: 'fast' | 'agent' | 'hermes' | 'local' | 'stop' | 'empty' | null
+  stages?: Partial<Record<'stt' | 'route' | 'llm_first' | 'llm_total' | 'tts_first', number>>
+  // с, конец фразы → первый звук ответа (или появление текста, если ответ без голоса)
+  firstSound?: number
+  silent?: boolean
+}
+
 export interface Message {
   id: number
   role: 'user' | 'assistant' | 'error'
@@ -10,6 +19,9 @@ export interface Message {
   // Просьба ещё выполняется: id хода (для ✕), с какого момента, что делает.
   // background — ушла в фон: не держит «думаю», видна в полоске фоновых задач.
   pending?: { turnId: string; since: number; tool?: string; background?: boolean }
+  timing?: TurnTiming
+  // Ответ перебили («Джарвис», тап, новая реплика) — озвучен не до конца.
+  interrupted?: boolean
 }
 
 // Запись истории чата с ядра (GET /chat/history).
@@ -124,12 +136,14 @@ export interface TurnEvent {
   // Итог: ответ (и озвучка по id), отмена или ошибка.
   reply?: string
   tools?: string[]
-  speech?: { id: string; count: number } | null
+  // streaming — растущая озвучка: приходит раньше reply, играть сразу, в reply не повторять.
+  speech?: { id: string; count: number; streaming?: boolean } | null
   cancelled?: boolean
   error?: string
   // Ход ушёл в фон: ack — подтверждение («скажу, когда будет готово»), speech — его озвучка.
   background?: boolean
   ack?: string
+  timing?: TurnTiming
   // Событие дослано после переподключения SSE — столько секунд назад.
   age?: number
 }

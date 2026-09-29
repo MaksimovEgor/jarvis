@@ -18,10 +18,14 @@ import type {
 export interface SpeechMore {
   id: string
   count: number
+  // Растущая озвучка: ответ ещё пишется, count неизвестен — куски до 204.
+  streaming?: boolean
 }
 
-export async function fetchSpeechChunk(id: string, n: number): Promise<Blob> {
+// null — кусков больше нет (204: растущая озвучка закончилась).
+export async function fetchSpeechChunk(id: string, n: number): Promise<Blob | null> {
   const resp = await fetch(`tts/chunk/${id}/${n}`)
+  if (resp.status === 204) return null
   if (!resp.ok) {
     throw new Error(`Сервер ответил ${resp.status}`)
   }
@@ -110,6 +114,16 @@ export interface PlayerReport {
   held?: boolean
   // iOS не разрешил play() без касания — это не зависание.
   blocked?: boolean
+}
+
+// Замеры хода, видные только экрану (app/metrics.py).
+export function sendTurnMetrics(m: {
+  turn_id: string
+  first_sound?: number
+  interrupted?: boolean
+  silenced_after?: number
+}): void {
+  void postJson('metrics/turn', { device: DEVICE_ID, ...m }).catch(() => undefined)
 }
 
 // Диагностика с телефона в журнал ядра: в Safari на iPhone нет консоли под рукой.

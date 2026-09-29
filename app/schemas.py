@@ -69,6 +69,15 @@ class ClientLog(BaseModel):
     message: str
 
 
+class ClientTurnMetrics(BaseModel):
+    """POST /metrics/turn — замеры хода, видные только экрану (app/metrics.py)."""
+    turn_id: str
+    device: str
+    first_sound: float | None = None  # с, конец фразы → первый звук ответа
+    interrupted: bool = False
+    silenced_after: float | None = None  # с, «Джарвис» услышан → голос остановлен
+
+
 class LocalChatRequest(BaseModel):
     """/local/chat — чат с локальной моделью мимо Hermes (Telegram: /local)."""
     session_id: str = "telegram"

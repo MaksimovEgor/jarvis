@@ -2,6 +2,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 
 import { toolLabel } from '../toolLabels'
+import LatencyLine from './LatencyLine.vue'
 import type { Message } from '../types'
 
 const props = defineProps<{ messages: Message[] }>()
@@ -62,6 +63,8 @@ watch(
         </button>
       </small>
       <small v-else-if="m.tools?.length" class="log__tools">{{ m.tools.join(' · ') }}</small>
+      <small v-if="m.interrupted" class="log__tools">— прервано</small>
+      <LatencyLine v-if="m.timing" :timing="m.timing" />
     </article>
   </section>
 </template>

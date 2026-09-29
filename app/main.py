@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import history
+from app import history, metrics
 from app.web_auth import WebAuth
 from app.agent import conflicts, router
 from app.agent.orchestrator import CloudUnavailable, run_agent
@@ -26,7 +27,7 @@ from app.config import settings
 from app.mcp_server import mcp
 from app.music import devices, library_api, media, taste, web_player, yandex
 from app.schemas import (
-    AudioChatResponse, AudioMore, CancelRequest, ClientLog, LocalChatRequest, PushSubscribeRequest,
+    AudioChatResponse, AudioMore, CancelRequest, ClientLog, ClientTurnMetrics, LocalChatRequest, PushSubscribeRequest,
     PushUnsubscribeRequest, TextChatRequest, TextChatResponse,
 )
 from app.services import local_chat, speaker, speech, stt, transcribe, tts, webpush
@@ -47,6 +48,7 @@ _mcp_app = mcp.streamable_http_app()
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     timers.start()
+    metrics.prune()
     await yandex.start()
     likes_sync = asyncio.create_task(yandex.sync_likes_daily())
     # Раз в сутки профиль dj разбирает прослушанное и размечает лайки.
@@ -120,6 +122,7 @@ _TOO_SLOW = "Не успел разобраться за минуту. Если 
 
 async def _answer(
     session_id: str, text: str, device: str, speak: bool, inline: bool, progress: Callable[[str], None],
+    on_speech: Callable[[Spoken], None] | None = None,
 ) -> tuple[str, list[str], Spoken | None]:
     """Весь ход целиком — и ответ, и его озвучка: «стоп» должен отменять и
     синтез длинного ответа, иначе он прозвучит уже после «стопа».
@@ -127,38 +130,89 @@ async def _answer(
         быстрые команды (router) ─► плеер, таймер — доли секунды
         остальное ─► свой агент (короткая история, без памяти Hermes)
                      └ память, напоминания, Telegram, «в фоне» ─► Hermes
+
+    Веб (on_speech): свой агент отвечает потоком, и голос начинается с первой
+    готовой фразы — экран получает id растущей озвучки раньше текста ответа.
     """
     fast = await router.try_fast(text, device)
+    metrics.mark("route")
     if fast is not None:
-        reply, tools = fast.text, [fast.tool]
-    else:
-        asked_background = conflicts.wants_background(text)
+        metrics.set_kind("fast")
+        return fast.text, [fast.tool], await speech.speak(fast.text, inline) if speak else None
+
+    asked_background = conflicts.wants_background(text)
+    stream: speech.SpeechStream | None = None
+    fed: list[str] = []
+
+    def on_sentence(sentence: str) -> None:
+        nonlocal stream
+        if stream is None:
+            stream = speech.SpeechStream()
+            if on_speech is not None:
+                on_speech(Spoken(None, stream.job_id, 0))
+        fed.append(sentence)
+        stream.feed(sentence)
+
+    # Фон озвучивается целиком по готовности; asus-listener — как раньше, без потока.
+    streaming = speak and on_speech is not None and not asked_background
+    try:
         # На время хода MCP-инструменты играют и ставят таймеры на этом устройстве.
         with devices.turn(device):
             try:
                 async with asyncio.timeout(None if asked_background else settings.foreground_limit_seconds):
-                    reply, tools = await _think(session_id, text, progress, asked_background)
+                    reply, tools = await _think(
+                        session_id, text, progress, asked_background,
+                        on_sentence if streaming else None if inline else _ignore_sentence,
+                    )
+                # Без потока (Hermes) первая фраза готова вместе со всем ответом.
+                metrics.mark("llm_first")
+                metrics.mark("llm_total")
             except TimeoutError:
                 logger.warning("«%s» не уложился в %.0f с — отменён", text, settings.foreground_limit_seconds)
                 reply, tools = _TOO_SLOW, []
-    return reply, tools, await speech.speak(reply, inline) if speak else None
+    except BaseException:
+        # Отмена или ошибка хода: сказанное доиграет, новых кусков не будет —
+        # экран не ждёт следующий кусок до STREAM_WAIT.
+        if stream is not None:
+            stream.close()
+        raise
+    if stream is None:
+        return reply, tools, await speech.speak(reply, inline) if speak else None
+    # Ответ не тот, что звучал (Hermes после упавшего облака, «не успел», «Готово.»
+    # после инструмента) — договорить его в ту же озвучку.
+    if _plain(reply) not in _plain(" ".join(fed)):
+        for sentence in re.split(r"(?<=[.!?…])\s+", reply):
+            stream.feed(sentence)
+    return reply, tools, stream.close()
+
+
+def _plain(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _ignore_sentence(_: str) -> None:
+    pass
 
 
 async def _think(
     session_id: str, text: str, progress: Callable[[str], None], asked_background: bool,
+    on_sentence: Callable[[str], None] | None = None,
 ) -> tuple[str, list[str]]:
     history = _sessions.setdefault(session_id, [])
     hermes = settings.agent_backend == "hermes" and settings.llm_mode != "local"
     if not hermes:
-        return await run_agent(history, text)
+        metrics.set_kind("local" if settings.llm_mode == "local" else "agent")
+        return await run_agent(history, text, on_sentence=on_sentence)
     if not (asked_background or router.needs_hermes(text)):
         try:
-            return await run_agent(history, text, fallback_local=False)
+            metrics.set_kind("agent")
+            return await run_agent(history, text, fallback_local=False, on_sentence=on_sentence)
         except CloudUnavailable as exc:
             # Облако своего агента не отвечает (нет ключа, кончились деньги) —
             # отвечает Hermes, как раньше.
             logger.warning("Свой агент без облака (%s) — отвечает Hermes", exc)
     try:
+        metrics.set_kind("hermes")
         return await run_hermes(session_id, _with_recent(session_id, text), progress)
     except Exception:
         # Hermes лёг, ничего не успев сделать (сделанное он возвращает как
@@ -193,12 +247,13 @@ _background: set[asyncio.Task[None]] = set()
 
 async def _start_turn(
     turn_id: str, session_id: str, device: str, text: str, speak: bool, inline: bool,
+    on_speech: Callable[[Spoken], None] | None = None,
 ) -> tuple[Turn, str | None]:
     """Запустить ход. В фон — только по просьбе («…в фоне»): тогда вторым
     идёт подтверждение для пользователя, иначе None."""
     turn = turns.start(
         turn_id, session_id, device, text,
-        lambda progress: _answer(session_id, text, device, speak, inline, progress),
+        lambda progress: _answer(session_id, text, device, speak, inline, progress, on_speech),
     )
     if not conflicts.wants_background(text):
         return turn, None
@@ -254,17 +309,24 @@ def _detach(
     """Ход веба: запрос уже вернул «принято», всё остальное — событиями SSE."""
 
     async def job() -> None:
+        sw = metrics.begin(turn_id, device)
         try:
             heard = text if audio is None else await _transcribe(*audio)
             if audio is not None:
+                metrics.mark("stt")
                 turns.emit(device, turn_id, transcript=heard)
             if not heard.strip():
+                metrics.set_kind("empty")
                 reply, tools, spoken = "Не расслышал.", [], await speech.speak("Не расслышал.", False)
             elif conflicts.is_just_stop(heard):
+                metrics.set_kind("stop")
                 reply, tools, spoken = await _stop_everything(session_id, device, speak, False)
                 history.append(session_id, heard, reply, tools, turn_id=turn_id)
             else:
-                turn, ack = await _start_turn(turn_id, session_id, device, heard, speak, False)
+                turn, ack = await _start_turn(
+                    turn_id, session_id, device, heard, speak, False,
+                    lambda spoken: turns.emit(device, turn_id, speech={"id": spoken.job_id, "count": 0, "streaming": True}),
+                )
                 if ack is not None:
                     # Основной план свободен: экран снимает «думаю», звучит подтверждение.
                     turns.emit(device, turn_id, background=True, ack=ack,
@@ -275,7 +337,10 @@ def _detach(
                 reply, tools, spoken = result
                 if ack is not None:
                     await _push_if_away(device, turn_id, reply)
-            turns.emit(device, turn_id, reply=reply, tools=tools, speech=_speech_ref(spoken))
+            turns.emit(device, turn_id, reply=reply, tools=tools, speech=_speech_ref(spoken), timing=sw.as_dict())
+            # В журнал — когда синтезирован первый кусок, но отдельно: ход уже
+            # закончен, и экран после переподключения не должен видеть его идущим.
+            _keep(asyncio.create_task(_record_when_spoken(sw, spoken)))
         except Exception as exc:
             logger.exception("Ход %s упал", turn_id)
             error = f"Не получилось: {exc}"[:300]
@@ -283,6 +348,16 @@ def _detach(
             turns.emit(device, turn_id, error=error)
 
     turns.detach(turn_id, device, text or "", job())
+
+
+async def _record_when_spoken(sw: metrics.Stopwatch, spoken: Spoken | None) -> None:
+    await speech.first_ready(spoken)
+    metrics.record_server(sw)
+
+
+def _keep(task: asyncio.Task[None]) -> None:
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 async def _push_if_away(device: str, turn_id: str, text: str) -> None:
@@ -416,6 +491,18 @@ async def push_unsubscribe(req: PushUnsubscribeRequest) -> dict:
     return {"status": "ok"}
 
 
+@app.post("/metrics/turn")
+async def metrics_turn(m: ClientTurnMetrics) -> dict:
+    """Замеры, которые видит только экран: конец фразы → первый звук, перебивание."""
+    metrics.record_client(m.turn_id, _device(m.device), m.model_dump(exclude={"turn_id", "device"}, exclude_none=True))
+    return {"ok": True}
+
+
+@app.get("/metrics/latency")
+async def metrics_latency(days: int = 7) -> dict:
+    return metrics.summary(days)
+
+
 @app.post("/client/log")
 async def client_log(entry: ClientLog) -> dict:
     """Диагностика с телефона (распознавание «Джарвис» в Safari) — в журнал ядра."""
@@ -452,9 +539,11 @@ def _audio(spoken: Spoken | None) -> dict[str, Any]:
 @app.get("/tts/chunk/{job_id}/{n}")
 async def tts_chunk(job_id: str, n: int) -> Response:
     try:
-        return Response(await speech.chunk(job_id, n), media_type="audio/wav")
+        wav = await speech.chunk(job_id, n)
     except KeyError:
         raise HTTPException(404, "нет такого куска озвучки")
+    # 204 — растущая озвучка закончилась раньше: кусков больше нет.
+    return Response(wav, media_type="audio/wav") if wav is not None else Response(status_code=204)
 
 
 # Веб-интерфейс (web/, собирается `npm run build`). Монтируется последним,

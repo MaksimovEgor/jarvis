@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, type SpeechMore } from './api'
+import { cancelTurn, fetchHistory, fetchSpeechChunk, sendAudio, sendText, sendTurnMetrics, type SpeechMore } from './api'
 import BackgroundTasks from './components/BackgroundTasks.vue'
 import ChatLog from './components/ChatLog.vue'
 import MyMusic from './components/MyMusic.vue'
@@ -104,9 +104,9 @@ const wake = useWakeWord({
     earcon.listen()
     music.hold()
   },
-  onWake: (command) => {
+  onWake: (command, heardAt) => {
     if (command) {
-      void ask((turnId) => sendText(command, true, turnId), command)
+      void ask((turnId) => sendText(command, true, turnId), command, heardAt)
       // Статус мог не смениться (уже «думаю») — снова слушать явно.
       syncWake()
     } else {
@@ -147,6 +147,9 @@ interface InFlight {
   held: boolean
   // Ушёл в фон: «думаю» и музыку уже не держит.
   background: boolean
+  // Конец фразы (Date.now()) — от него считается задержка ответа.
+  // null — ход не с этой вкладки (узнали о нём после перезагрузки).
+  t0: number | null
 }
 
 // Ходы в работе по id. Сюда же попадают идущие ходы, о которых вкладка
@@ -155,8 +158,8 @@ const inFlight = new Map<string, InFlight>()
 // Завершённые — повторно досланный итог не показываем дважды.
 const settled = new Set<string>()
 
-function begin(turnId: string, msg: Message, held: boolean, background = false): InFlight {
-  const entry: InFlight = { msg, accepted: false, held, background }
+function begin(turnId: string, msg: Message, held: boolean, background = false, t0: number | null = null): InFlight {
+  const entry: InFlight = { msg, accepted: false, held, background, t0 }
   msg.pending = { turnId, since: Date.now(), background }
   inFlight.set(turnId, entry)
   if (!background) pending.value += 1
@@ -201,26 +204,46 @@ async function onTurn(event: TurnEvent): Promise<void> {
     await toBackground(entry, event)
     return
   }
+  if (event.speech?.streaming && !event.reply) {
+    startStream(event, entry)
+    return
+  }
   const final = event.reply !== undefined || event.cancelled || event.error !== undefined
   if (!final || settled.has(event.id)) return
 
   const done = settle(event.id)
   if (event.cancelled) {
+    streams.delete(event.id)
     if (done) done.msg.cancelled = true
   } else if (event.error !== undefined) {
     push('error', event.error)
   } else {
-    push('assistant', event.reply ?? '', event.tools)
-    if (event.speech && isFresh(event)) {
+    const answer = push('assistant', event.reply ?? '', event.tools)
+    // Задержку показываем только у ответов на просьбу с этой вкладки, не у фоновых.
+    const measured = done && !done.background && done.t0 !== null ? { turnId: event.id, t0: done.t0 } : null
+    if (event.timing) answer.timing = { ...event.timing }
+    const onSound = () => measured && markFirstSound(answer, measured.turnId, measured.t0, Date.now())
+    answers.set(event.id, answer)
+    if (cut.delete(event.id)) answer.interrupted = true
+    const stream = streams.get(event.id)
+    if (stream) {
+      // Голос уже звучит (растущая озвучка) — текст к нему, повторять не надо.
+      streams.delete(event.id)
+      stream.answer = answer
+      if (measured && stream.soundAt !== undefined) markFirstSound(answer, event.id, measured.t0, stream.soundAt)
+      await stream.playing
+    } else if (event.speech && isFresh(event)) {
       if (done?.background) {
         // Фоновая задача готова: сигнал, и музыка молчит, пока звучит ответ.
         music.hold()
         earcon.ready()
-        await speak(event.speech)
+        await speak(event.speech, undefined, event.id)
         music.release()
       } else {
-        await speak(event.speech)
+        await speak(event.speech, onSound, event.id)
       }
+    } else if (measured) {
+      markFirstSound(answer, measured.turnId, measured.t0, null)
     }
   }
   if (done?.held) music.release()
@@ -252,6 +275,39 @@ async function recoverLost(lost: [string, InFlight][]): Promise<void> {
     else push('error', 'Ответ потерялся: Джарвис перезапускался. Повтори, пожалуйста.')
     if (entry.held) music.release()
   }
+}
+
+// Первый звук ответа (или текст, если ответ без голоса) — главная цифра итерации.
+// soundAt = null — ответ без голоса: считаем до появления текста, на ядро не шлём.
+function markFirstSound(answer: Message, turnId: string, t0: number, soundAt: number | null): void {
+  if (answer.timing?.firstSound !== undefined) return
+  const firstSound = Math.round(((soundAt ?? Date.now()) - t0) / 10) / 100
+  answer.timing = { ...answer.timing, firstSound, silent: soundAt === null }
+  if (soundAt !== null) sendTurnMetrics({ turn_id: turnId, first_sound: firstSound })
+}
+
+// Растущая озвучка: голос начинается раньше, чем приходит текст ответа.
+interface Stream {
+  playing: Promise<void>
+  soundAt?: number
+  answer?: Message
+}
+const streams = new Map<string, Stream>()
+
+function startStream(event: TurnEvent, entry: InFlight | undefined): void {
+  if (!event.speech || !isFresh(event) || streams.has(event.id) || settled.has(event.id)) return
+  const t0 = entry && !entry.background ? entry.t0 : null
+  const stream: Stream = { playing: Promise.resolve() }
+  stream.playing = speak(
+    event.speech,
+    () => {
+      stream.soundAt = Date.now()
+      // Текст пришёл раньше звука — строка времени появляется сейчас.
+      if (stream.answer && t0 !== null) markFirstSound(stream.answer, event.id, t0, stream.soundAt)
+    },
+    event.id,
+  )
+  streams.set(event.id, stream)
 }
 
 function onCancel(turnId: string): void {
@@ -287,15 +343,24 @@ document.addEventListener('visibilitychange', syncWake)
 interface Speech {
   more: SpeechMore
   done: () => void
+  // Зазвучал первый кусок.
+  onStart?: () => void
+  // Ответ какого хода — чтобы пометить «прервано». Нет — подтверждение, объявление.
+  turnId?: string
 }
 const speechQueue: Speech[] = []
 let draining = false
 // Меняется при каждом «перебили» — недоигранный длинный ответ это видит.
 let speechGeneration = 0
+// Ход, чей ответ сейчас звучит (или качается следующий кусок).
+let speakingTurn: string | null = null
+// Ответы по ходу (для пометки «прервано»); перебитые до прихода текста — в cut.
+const answers = new Map<string, Message>()
+const cut = new Set<string>()
 
-function speak(more: SpeechMore): Promise<void> {
+function speak(more: SpeechMore, onStart?: () => void, turnId?: string): Promise<void> {
   return new Promise((done) => {
-    speechQueue.push({ more, done })
+    speechQueue.push({ more, done, onStart, turnId })
     void drainSpeech()
   })
 }
@@ -305,36 +370,51 @@ async function drainSpeech(): Promise<void> {
   draining = true
   while (speechQueue.length && !recorder.isRecording.value) {
     const next = speechQueue.shift()!
+    speakingTurn = next.turnId ?? null
     await playSpeech(next)
+    speakingTurn = null
     next.done()
   }
   draining = false
 }
 
 // Куски озвучки по очереди: следующий качается, пока звучит текущий.
-async function playSpeech({ more }: Speech): Promise<void> {
+async function playSpeech({ more, onStart }: Speech): Promise<void> {
   const generation = speechGeneration
-  let upcoming: Promise<Blob> | null = fetchSpeechChunk(more.id, 0)
+  let upcoming: Promise<Blob | null> | null = fetchSpeechChunk(more.id, 0)
   for (let n = 0; upcoming; n++) {
-    let blob: Blob
+    let blob: Blob | null
     try {
       blob = await upcoming
     } catch {
       return
     }
-    upcoming = n + 1 < more.count ? fetchSpeechChunk(more.id, n + 1) : null
+    if (!blob) return
+    upcoming = more.streaming || n + 1 < more.count ? fetchSpeechChunk(more.id, n + 1) : null
     if (generation !== speechGeneration) return
     const url = URL.createObjectURL(blob)
-    await player.playUrl(url)
+    const playing = player.playUrl(url)
+    if (n === 0) onStart?.()
+    await playing
     URL.revokeObjectURL(url)
   }
 }
 
 // Пользователь заговорил — Джарвис замолкает, недосказанное не досказывает.
 function interrupt(): void {
+  const heardAt = Date.now()
+  const victims = [speakingTurn, ...speechQueue.map((s) => s.turnId)].filter((id): id is string => Boolean(id))
   speechGeneration += 1
   for (const s of speechQueue.splice(0)) s.done()
   player.stop()
+  speakingTurn = null
+  const silencedAfter = Math.round((Date.now() - heardAt) / 10) / 100
+  for (const turnId of victims) {
+    const answer = answers.get(turnId)
+    if (answer) answer.interrupted = true
+    else cut.add(turnId) // растущая озвучка: текст ответа ещё не пришёл
+    sendTurnMetrics({ turn_id: turnId, interrupted: true, silenced_after: silencedAfter })
+  }
 }
 
 // Любой тап — шанс разблокировать звук на iOS (он разрешает только в жесте).
@@ -397,9 +477,10 @@ async function startRecording(): Promise<void> {
 
 async function finishRecording(): Promise<void> {
   if (!recorder.isRecording.value) return
+  const t0 = Date.now()
   const blob = await recorder.stop()
   void drainSpeech()
-  await ask((turnId) => sendAudio(blob, turnId), null)
+  await ask((turnId) => sendAudio(blob, turnId), null, t0)
 }
 
 async function cancelRecording(): Promise<void> {
@@ -422,9 +503,9 @@ async function onSubmit(): Promise<void> {
 
 // Одна реплика. text=null — голос: текст придёт событием (расшифровка).
 // Музыка удержана вызывающим; отпускается, когда ответ доозвучен (onTurn).
-async function ask(request: (turnId: string) => Promise<void>, text: string | null): Promise<void> {
+async function ask(request: (turnId: string) => Promise<void>, text: string | null, t0 = Date.now()): Promise<void> {
   const turnId = crypto.randomUUID()
-  const entry = begin(turnId, push('user', text ?? '…'), true)
+  const entry = begin(turnId, push('user', text ?? '…'), true, false, t0)
   try {
     await request(turnId)
     entry.accepted = true

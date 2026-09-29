@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 
 import { clientLog, playerControl, playerEventsUrl, playerReport, rateTrack, type PlayerReport } from '../api'
 import type { FromWhere, PlayerEvent, PlayerState, Rating, TrackMeta, TurnEvent, TurnsEvent } from '../types'
+import { ensurePlayback } from './useAudioSession'
 import { SILENCE } from './usePlayer'
 
 const REPORT_EVERY_MS = 10_000
@@ -9,6 +10,10 @@ const RECONNECT_MS = 3_000
 // Столько <audio> может ждать данные, пока должно играть, — дальше просим
 // ядро переключить трек (оно же запишет «завис» в журнал для метрики).
 const STALL_MS = 10_000
+// iOS иногда молча не начинает новый трек: play() не падает, но и 'waiting'
+// нет — сторож выше не запускается, экран показывает трек в тишине. Столько
+// ждём 'playing' после play(); потом одна перезагрузка, потом — как завис.
+const START_MS = 6_000
 
 // Громкость <audio> на iPhone не меняется (только кнопками) — сообщаем ядру,
 // чтобы «тише» отвечало честно.
@@ -63,6 +68,8 @@ export function useMusic(
   let lastEventId = ''
   let reconnectTimer: number | null = null
   let stallTimer: number | null = null
+  // seq трека, который уже перезагружали из-за молчаливого старта.
+  let reloadedSeq = -1
 
   const hasTrack = computed(() => title.value !== null)
 
@@ -87,6 +94,8 @@ export function useMusic(
   function apply(): void {
     if (!hasTrack.value) return
     if (wantPlaying.value && held === 0) {
+      ensurePlayback()
+      if (!isPlaying.value) watchStart()
       audio
         .play()
         .then(() => setBlocked(false))
@@ -220,6 +229,29 @@ export function useMusic(
         report({ stalled: true })
       }
     }, STALL_MS)
+  }
+
+  // Сторож старта: после play() должно прийти 'playing'. Не пришло — один
+  // раз перезагружаем с той же позиции (то же, что «следующий → назад»),
+  // не помогло — просим ядро переключить трек.
+  function watchStart(): void {
+    clearStall()
+    const startSeq = seq
+    stallTimer = window.setTimeout(() => {
+      stallTimer = null
+      if (startSeq !== seq || !hasTrack.value || !wantPlaying.value || held > 0) return
+      if (isPlaying.value || blocked.value || !audio.getAttribute('src')) return
+      if (reloadedSeq !== seq) {
+        reloadedSeq = seq
+        clientLog(`не стартовал, перезагружаю: ${title.value}`)
+        if (!live.value) pendingStart = audio.currentTime || position.value
+        audio.load()
+        apply()
+      } else if (!live.value) {
+        clientLog(`завис на старте: ${title.value}`)
+        report({ stalled: true })
+      }
+    }, START_MS)
   }
 
   audio.addEventListener('playing', () => {

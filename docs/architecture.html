@@ -202,6 +202,7 @@
     <a href="#wave">Моя волна и вкус</a>
     <a href="#sources">Источники: Яндекс, YouTube, SoundCloud</a>
     <a href="#voice">Озвучка</a>
+    <a href="#latency">Задержка ответа</a>
     <a href="#timers">Таймеры и объявления</a>
     <a href="#gpu">GPU: расшифровка и резервная LLM</a>
     <a href="#delivery">Доставка и обрывы</a>
@@ -323,7 +324,7 @@ sequenceDiagram
       <h3>Те же шаги текстом, с файлами и развилками</h3>
       <ol class="steps">
         <li><div class="who">Слышит «Джарвис» — браузер <span class="m">useWakeWord.ts</span></div>
-          <div class="what">Встроенное распознавание браузера (на iPhone от Apple), <code>continuous</code>, <code>ru-RU</code>. Работает, только пока вкладка видна, не идёт запись и не играет музыка (открытый микрофон на iPhone переводит Bluetooth-наушники в режим гарнитуры — моно, 16 кГц; при музыке говорить — кнопкой). Регулярка ловит «джарвис / джервис / жарвис / jarvis…», команда — текст после последнего совпадения.<br><span class="fail">Нет Web Speech API — кнопки «Джарвис» нет, только тап. iOS запретил старт без жеста → кнопка «Нажми: «Джарвис»». Распознаватель передумал (слова уже нет) → onCancel, музыка возвращается.</span></div></li>
+          <div class="what">Встроенное распознавание браузера (на iPhone от Apple), <code>continuous</code>, <code>ru-RU</code>. Работает, только пока вкладка видна, не идёт запись и не играет музыка (открытый микрофон на iPhone переводит Bluetooth-наушники в режим гарнитуры — моно, 16 кГц; при музыке говорить — кнопкой). Регулярка ловит имя целым словом: «джарвис / джервис / жарвис / джавис / джарви / джарвиса / дарвис / джар вис / jarvis…» (но не «обжарив», «жаворонок»), команда — текст после последнего совпадения.<br><span class="fail">Нет Web Speech API — кнопки «Джарвис» нет, только тап. iOS запретил старт без жеста → кнопка «Нажми: «Джарвис»». Распознаватель передумал (слова уже нет) → onCancel, музыка возвращается.</span></div></li>
         <li><div class="who">Реакция на слово — <span class="m">App.vue onAlert</span></div>
           <div class="what">Сразу, не дожидаясь конца фразы: <code>interrupt()</code> обрывает текущую озвучку, <code>earcon.listen()</code> даёт сигнал, <code>music.hold()</code> ставит музыку на паузу (это счётчик, а не флаг).</div></li>
         <li><div class="who">Конец команды — <span class="m">finishCommand</span></div>
@@ -375,7 +376,7 @@ flowchart TD
       </pre></div>
       <div class="grid2">
         <div class="note"><h3>Кто делает STT</h3><p>После «Джарвис, команда» текст уже есть от распознавателя браузера — ядро получает текст. После тапа или «Джарвис» с паузой — запись уходит файлом, и распознаёт <code>GigaAM v3</code> (e2e, с пунктуацией), int8 на CPU — 0,26 с на фразу, 0,33 ГБ RAM (на GPU было бы 0,06 с, но +0,65 ГБ RAM, а память на asus — узкое место). Запись длиннее 22 с режется по самой тихой паузе. Откат на прежний Whisper — <code>STT_ENGINE=whisper</code>.</p></div>
-        <div class="note"><h3>Перебивание</h3><p>«Джарвис» слышен и пока Джарвис думает, и пока говорит (но не пока играет музыка — см. Bluetooth выше): голос замолкает, недосказанное выбрасывается (<code>speechGeneration</code>). Прошлый ход при этом не отменяется — решает диспетчер конфликтов.</p></div>
+        <div class="note"><h3>Перебивание</h3><p>«Джарвис» слышен и пока Джарвис думает, и пока говорит (но не пока играет музыка — см. Bluetooth выше): голос замолкает, недосказанное выбрасывается (<code>speechGeneration</code>). Прошлый ход при этом не отменяется — решает диспетчер конфликтов. Перебитый ответ в чате — «— прервано» (и в метриках <code>interrupted</code>); если перебили растущую озвучку до прихода текста — пометка ставится, когда текст придёт.</p></div>
         <div class="note"><h3>Звук один</h3><p>Новая просьба что-то включить (или тап «играть» в приложении) сразу отменяет все идущие «включи…» этого устройства — и фоновые тоже (<code>turns.cancel_media</code>). Играет то, что попросили последним.</p></div>
         <div class="note"><h3>Предсказуемость (ревью 27.09)</h3><p>
           Устройство хода: свой агент — точно (<code>ContextVar</code>), MCP Hermes — последний начатый из идущих ходов (<code>devices.turn</code>).
@@ -427,20 +428,26 @@ flowchart LR
   F -- "None" --> D["with devices.turn(device)"]
   D --> B{"AGENT_BACKEND"}
   B -- "hermes" --> H["run_hermes"]
-  B -- "builtin" --> O["orchestrator.run_agent<br/>DeepSeek + web_search, web_fetch, music<br/>до 4 шагов"]
+  B -- "builtin" --> O["orchestrator.run_agent<br/>DeepSeek + weather, web_search, web_fetch, music<br/>до 4 шагов"]
   H --> SP["speech.speak(reply)"]
-  O --> SP
+  O -- "веб, не фон:<br/>поток, on_sentence" --> ST["SpeechStream.feed(фраза)<br/>первая фраза → событие speech{streaming}"]
+  O -- "asus / фон" --> SP
+  ST --> CLS["stream.close() → count<br/>ответ не тот, что звучал, — дочитать"]
       </pre></div>
-      <p class="caption">Озвучка — часть хода: «стоп» отменяет и долгий синтез. Фоновый ход «стоп» и новые реплики не трогают, только ✕ в чате.</p>
+      <p class="caption">Озвучка — часть хода: «стоп» отменяет и долгий синтез; отмена хода закрывает растущую озвучку (клиенту 204). Фоновый ход «стоп» и новые реплики не трогают, только ✕ в чате. В system-промпт своего агента каждый ход дописываются дата, время и день недели (<code>prompts.now_line</code>) — своих часов у модели нет.</p>
     </section>
 
     <!-- ============================================================ -->
     <section id="router">
       <h2>Быстрые команды без Hermes</h2>
-      <p class="sub"><code>router.py</code>. Только для браузера (у asus плеера нет). Текст нормализуется: нижний регистр, ё→е, без «Джарвис», «и / ну / пожалуйста» в начале. Правила нарочно узкие: сомнение → агент. Быстрый путь ничего не нашёл — так и говорит сразу, без агента. Кто отвечает дальше: свой агент (<code>orchestrator.py</code>, короткая история, без памяти) — по умолчанию; Hermes — только когда нужен «второй мозг»: память, заметки, напоминания, Telegram, «в фоне» (<code>router.needs_hermes</code>). Своё облако не отвечает — отвечает Hermes. Инструменты своего агента: <code>weather</code> (Open-Meteo через прокси VPS — с российских IP 403; погода за ~2,5 с вместо 40 с поиска), <code>web_search</code>, <code>web_fetch</code>, <code>music</code>; последний шаг цикла — без инструментов, чтобы ответить по найденному. Вслух — не больше ~450 символов (<code>speech.for_voice</code>), остальное на экране; текст ответа уходит на экран, не дожидаясь синтеза. Сказки («включи сказку про автобус», «сказку колобок найди») — сразу аудиосказка (<code>_TALE</code>, kind=audiobook), без агента. Ответы плеера называют трек коротко (<code>short_title</code>: без эмодзи и хвостов «| Сказка для детей…»).</p>
+      <p class="sub"><code>router.py</code>. Плеер — только для браузера (у asus плеера нет); справочное (время, дата, погода, таймеры) и режим LLM — везде. Текст нормализуется: нижний регистр, ё→е, без «Джарвис», «и / ну / пожалуйста» в начале. Правила нарочно узкие: сомнение → агент. Быстрый путь ничего не нашёл — так и говорит сразу, без агента. Кто отвечает дальше: свой агент (<code>orchestrator.py</code>, короткая история, без памяти) — по умолчанию; Hermes — только когда нужен «второй мозг»: память, заметки, напоминания, Telegram, «в фоне» (<code>router.needs_hermes</code>). Своё облако не отвечает — отвечает Hermes. Инструменты своего агента: <code>weather</code> (Open-Meteo через прокси VPS — с российских IP 403; погода за ~2,5 с вместо 40 с поиска), <code>web_search</code>, <code>web_fetch</code>, <code>music</code>; последний шаг цикла — без инструментов, чтобы ответить по найденному. Вслух — не больше ~450 символов (<code>speech.for_voice</code>), остальное на экране; текст ответа уходит на экран, не дожидаясь синтеза. Сказки («включи сказку про автобус», «сказку колобок найди») — сразу аудиосказка (<code>_TALE</code>, kind=audiobook), без агента. Ответы плеера называют трек коротко (<code>short_title</code>: без эмодзи и хвостов «| Сказка для детей…»).</p>
       <div class="tbl"><table>
         <thead><tr><th>Фраза</th><th>Действие</th><th>В Hermes, если</th></tr></thead>
         <tbody>
+          <tr><td>«который час», «сколько время», «подскажи время», «сколько на часах»</td><td class="m">say_time</td><td>лишние слова («какое время лучше для…»)</td></tr>
+          <tr><td>«какое число», «какой сегодня день недели», «что сегодня за день»</td><td class="m">say_date (порядковое словами)</td><td>дата в прошлом/будущем</td></tr>
+          <tr><td>«какая погода», «что на улице», «сколько градусов»</td><td class="m">weather_now (первая строка Open-Meteo)</td><td>город, «завтра», совет («нужен ли зонт», «холодно ли»)</td></tr>
+          <tr><td>«какие у меня таймеры / напоминания», «есть ли напоминания»</td><td class="m">say_timers</td><td>«что у меня на сегодня» (календарь)</td></tr>
           <tr><td>«пауза», «останови музыку»</td><td class="m">player.pause</td><td>—</td></tr>
           <tr><td>«продолжи», «играй дальше»</td><td class="m">player.resume</td><td>—</td></tr>
           <tr><td>«продолжи книгу»</td><td class="m">resume_listening</td><td>—</td></tr>
@@ -460,7 +467,7 @@ flowchart LR
           <tr><td>исключение внутри быстрого пути</td><td>—</td><td>всегда (в лог)</td></tr>
         </tbody>
       </table></div>
-      <p class="caption">kind определяется словами: «книга» → audiobook, «подкаст / выпуск / лекция / новости» → podcast, иначе music.</p>
+      <p class="caption">kind определяется словами: «книга» → audiobook, «подкаст / выпуск / лекция / новости» → podcast, иначе music. Справочное ловит смысл, а не одну фразу: вежливое начало («скажи / подскажи / а / ну») + ключ + хвост («сейчас», «пожалуйста»); всё, что длиннее, — агенту.</p>
     </section>
 
     <!-- ============================================================ -->
@@ -469,6 +476,7 @@ flowchart LR
       <p class="sub">Джарвис для Hermes — только «уши и рот». История разговора хранится в Hermes, ядро шлёт одну новую реплику и голосовые правила (<code>VOICE_INSTRUCTIONS</code>: 1–3 предложения, без markdown, числа словами, имена MCP-инструментов, чтобы не тратить шаг на tool_search).</p>
       <p class="sub">Инструменты Hermes для голоса и веб-чата (<code>platform_toolsets.api_server</code>, ставит <code>scripts/hermes-harden/apply.sh</code>): MCP jarvis, веб-поиск, память, история, скиллы, todo. Без terminal, файлов, code_execution, браузера, cron и субагентов: голос читает веб, и prompt injection со страницы не должен дотянуться до команд на asus. Задачи с терминалом — только из CLI/TUI на asus. Сломанный YAML Hermes трактует как «набор по умолчанию» (полный), поэтому скрипт после записи сверяет итоговый список.</p>
       <p class="sub">Cron «Сервер: ежедневная сводка 09:00» (<code>scripts/hermes-digest/</code>): пороги, известный шум и повторы проверяет <code>server-digest.py</code>, состояние между запусками — в <code>~/.hermes/scripts/.server-digest.state.json</code>. Всё в норме → пустой stdout → Hermes модель не зовёт (0 токенов). Есть новое или хуже → агент без инструментов (<code>enabled_toolsets: todo, no_mcp</code>, reasoning low) пишет 2–5 строк в Telegram. Раньше агент с terminal и <code>context_from: self</code> сам расследовал сервер: 145–260k токенов в день.</p>
+      <p class="sub">Резерв модели (<code>fallback_providers</code>, ставит <code>scripts/hermes-fallback/apply.sh</code>, основной профиль и dj): основной провайдер упал (402, 429, 5xx, сеть) → nous <code>stepfun/step-3.7-flash:free</code> → nous <code>upstage/solar-pro4:free</code>; следующий ход снова пробует основной. Резерв медленнее (тест: 13–43 с против 5 с), у бесплатного nous свой лимит (429). Служебные вызовы (заголовок сессии) резерв не используют.</p>
       <div class="diagram"><pre class="mermaid">
 flowchart TD
   S["run_hermes(session, text)"] --> C{"последняя реплика<br/>больше 10 мин назад?"}
@@ -565,7 +573,8 @@ flowchart TD
         <div class="note"><h3>iPhone</h3><p>Первый <code>play()</code> возможен только в жесте — любой тап «разблокирует» оба &lt;audio&gt; тишиной. Громкость меняется только кнопками. Длинное с YouTube — HLS; если HLS у видео нет (сказки, короткие книги) — файл целиком (<code>/media/file</code>). yt-dlp разгадывает подпись YouTube скриптом EJS (<code>--remote-components ejs:github</code>) — без него часть видео «not available». В фоне Safari рвёт SSE.</p></div>
         <div class="note"><h3>Ссылки googlevideo</h3><p>Привязаны к IP — поэтому и получение ссылки, и чтение идут через один SOCKS (<code>rdns=True</code>, <code>encoded=True</code>). 403 → ссылка берётся заново, второй раз 403 → 502.</p></div>
         <div class="note"><h3>Кнопки на экране и экране блокировки</h3><p><code>POST /player/control</code>: pause, resume, next, previous, stop. Перемотку браузер делает сам и сообщает позицию отчётом. ♡ / 👎 — <code>POST /library/rate</code>.</p></div>
-        <div class="note"><h3>Сторож зависаний</h3><p>Браузер: <code>&lt;audio&gt;</code> ждёт данные &gt; 10 с, хотя должен играть → <code>report {stalled}</code>. Ядро: экран открыт, не пауза, нет хода, а позиция не растёт 25 с → то же. Оба пути — <code>_on_end("stall")</code>: следующий трек и «stalled» в журнале.</p></div>
+        <div class="note"><h3>Аудиосессия iOS</h3><p>Открытый микрофон (кнопка или «Джарвис») переводит iOS в «звонок» — вывод тише, Bluetooth в гарнитуре, и обратно iOS возвращается не всегда. <code>useAudioSession</code> задаёт <code>navigator.audioSession.type</code> явно: микрофон открыт — <code>play-and-record</code>, закрыт и перед каждым <code>play()</code> — <code>playback</code>. Автостоп записи анализирует тишину в своём <code>AudioContext</code> и закрывает его после записи.</p></div>
+        <div class="note"><h3>Сторож зависаний</h3><p>Браузер: <code>&lt;audio&gt;</code> ждёт данные &gt; 10 с, хотя должен играть → <code>report {stalled}</code>. После <code>play()</code> нет <code>playing</code> 6 с (iOS молча не стартует трек) → один раз <code>load()</code> с той же позиции, снова тишина → <code>report {stalled}</code>. Ядро: экран открыт, не пауза, нет хода, а позиция не растёт 25 с → то же. Оба пути — <code>_on_end("stall")</code>: следующий трек и «stalled» в журнале.</p></div>
       </div>
     </section>
 
@@ -632,7 +641,7 @@ flowchart TD
       <div class="diagram"><pre class="mermaid">
 flowchart TD
   R["reply"] --> C["tts.clean: без эмодзи, markdown, в одну строку"]
-  C --> SPL["speech._split по фразам<br/>куски: ≤100, ≤2× прошлого, ≤400"]
+  C --> SPL["speech._split по фразам<br/>куски: ≤60, ≤2× прошлого, ≤400<br/>длинное первое предложение — по запятой/тире"]
   SPL --> J["job_id, count<br/>кусок 0 синтезируется сразу"]
   J --> CL["клиент: GET /tts/chunk/id/n<br/>ядро заодно начинает n+1"]
   CL --> SY["tts.synthesize(кусок)"]
@@ -646,7 +655,50 @@ flowchart TD
   ED -- "ошибка" --> PI
   PI -- "нет файла голоса" --> X["исключение → ход падает с ошибкой"]
       </pre></div>
-      <p class="caption">Куски живут 10 минут. Если пользователь перебил и клиент перестал их забирать, лишнее не синтезируется (опережение ровно на один кусок). Listener asus получает кусок 0 прямо в ответе base64, вебу — только id.</p>
+      <p class="caption">Куски живут 10 минут. Если пользователь перебил и клиент перестал их забирать, лишнее не синтезируется (опережение ровно на один кусок). Listener asus получает кусок 0 прямо в ответе base64, вебу — только id. Vosk тратит ~25 мс на символ, поэтому первый кусок короткий: 120 символов первого предложения — это 3 с тишины, «Солнечный свет, проходя через атмосферу,» — ~1 с.</p>
+      <h3>Растущая озвучка (веб, свой агент)</h3>
+      <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant L as DeepSeek (stream)
+  participant A as orchestrator
+  participant S as SpeechStream
+  participant W as браузер
+  L->>A: дельты текста
+  A->>S: feed(фраза 1) (SentenceSplitter)
+  S-->>W: SSE turn {speech: id, streaming}
+  S->>S: кусок 0 → синтез сразу
+  W->>S: GET /tts/chunk/id/0
+  L->>A: фразы 2..n
+  A->>S: feed → копятся в хвосте
+  W->>S: GET /tts/chunk/id/1 (кусок 0 заиграл)
+  S-->>W: хвост → кусок 1 (или ждать фразу)
+  A->>S: close()
+  S-->>W: SSE turn {reply, speech: id, count} — текст, не озвучивать заново
+  W->>S: GET /tts/chunk/id/n → 204, кусков больше нет
+      </pre></div>
+      <p class="caption"><code>speech.SpeechStream</code>: первая фраза — сразу кусок 0 (с резкой по запятой); остальные копятся в хвосте, пока кусок не наберёт 2× предыдущий, или пока клиент не попросит следующий кусок — тогда хвост отдаётся как есть. Ждущий клиент просыпается от каждой фразы; ждёт не дольше 60 с. Вступление «Сейчас проверю.» перед поиском звучит, но в чат не пишется — там итог последнего шага. Hermes, локальная модель, фон и listener asus — без потока: <code>speech.speak(reply)</code> как раньше.</p>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="latency">
+      <h2>Задержка ответа</h2>
+      <p class="sub"><code>app/metrics.py</code>. Секундомер хода — в ContextVar: его наследуют задачи хода (агент, синтез), поэтому этап отмечается <code>metrics.mark()</code> из любого места; вне хода (MCP, Telegram) — ничего. Пишутся только веб-ходы.</p>
+      <div class="diagram"><pre class="mermaid">
+flowchart LR
+  B["_detach: begin"] --> STT["stt"] --> R["route<br/>(router.try_fast)"] --> F["llm_first<br/>первая фраза"] --> T["llm_total"] --> TT["tts_first<br/>кусок 0 готов"]
+  TT --> J[("data/metrics/turns.jsonl")]
+  W["браузер: конец фразы → первый звук<br/>перебили → замолчал"] -- "POST /metrics/turn" --> J
+  J --> L["GET /metrics/latency?days=7<br/>медиана, p90, n по kind"]
+      </pre></div>
+      <div class="tbl"><table>
+        <thead><tr><th>Цель (docs/plans/it1-faster)</th><th>Как смотреть</th></tr></thead>
+        <tbody>
+          <tr><td>Быстрые команды — первый звук ≤ 1,0 с</td><td class="m">kinds.fast.first_sound.median</td></tr>
+          <tr><td>Вопрос агенту — первый звук ≤ 2,5 с</td><td class="m">kinds.agent.first_sound.median</td></tr>
+          <tr><td>«Джарвис» → тишина ≤ 0,5 с</td><td class="m">*.silenced_after (в браузере — только onAlert → stop)</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption">Отсчёт «конца фразы» на экране: кнопка — момент автостопа записи, «Джарвис» — последнее распознанное слово (видна пауза 1,8 с <code>COMMAND_PAUSE_MS</code>), текст — отправка. Под ответом строка «заговорил через X с» (<code>LatencyLine.vue</code>): тап — этапы, &gt; 2,5 с — жёлтым; перебитый ответ — «— прервано». Серверная строка пишется отдельной задачей после синтеза куска 0 — ход не висит «идущим». Журнал старше 30 дней обрезается при старте ядра. Замеры 27.09: «который час» — 2,1 с через LLM → быстрый путь, но синтез Vosk 0,6–1,4 с; вопрос агенту — первый кусок у клиента 2,6–3,9 с (было ~7 с).</p>
     </section>
 
     <!-- ============================================================ -->
@@ -781,7 +833,8 @@ sequenceDiagram
           <tr><td class="m">POST /chat/text, /chat/audio</td><td>браузер, listener</td><td>Реплика. <code>detach</code> — только для web</td></tr>
           <tr><td class="m">POST /chat/cancel</td><td>браузер ✕</td><td>Отменить ход или все ходы сессии</td></tr>
           <tr><td class="m">GET /chat/history</td><td>браузер</td><td>Лента после перезагрузки и поиск потерянных</td></tr>
-          <tr><td class="m">GET /tts/chunk/{id}/{n}</td><td>браузер, listener</td><td>Кусок озвучки</td></tr>
+          <tr><td class="m">GET /tts/chunk/{id}/{n}</td><td>браузер, listener</td><td>Кусок озвучки; растущая — ждёт кусок, 204 — кусков больше нет</td></tr>
+          <tr><td class="m">POST /metrics/turn, GET /metrics/latency</td><td>браузер, человек</td><td>Замеры экрана (первый звук, перебивание); медиана/p90 задержек</td></tr>
           <tr><td class="m">GET /player/events</td><td>браузер</td><td>SSE: state, seek, volume, announce, turn, turns</td></tr>
           <tr><td class="m">POST /player/report, /player/control</td><td>браузер</td><td>Отчёт плеера, кнопки</td></tr>
           <tr><td class="m">POST /library/rate, /library/play, /library/unmute</td><td>браузер</td><td>Лайк/дизлайк, запуск волны/лайков/трека, «Вернуть» исполнителя</td></tr>
@@ -806,6 +859,7 @@ sequenceDiagram
         <tbody>
           <tr><td class="m">data/chat/&lt;session&gt;.jsonl</td><td>Лента чата для экрана (не контекст модели)</td></tr>
           <tr><td class="m">data/timers.json</td><td>Таймеры и напоминания</td></tr>
+          <tr><td class="m">data/metrics/turns.jsonl</td><td>Задержки ходов: этапы ядра и замеры экрана, 30 дней</td></tr>
           <tr><td class="m">data/positions.json</td><td>Где остановились в длинном, до 200 записей</td></tr>
           <tr><td class="m">data/push.json, data/vapid.pem</td><td>Подписки на пуши и ключ VAPID (пересоздашь — подписки заново)</td></tr>
           <tr><td class="m">data/music/liked</td><td>Лайкнутые треки, навсегда</td></tr>

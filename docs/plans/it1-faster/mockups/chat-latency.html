@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мокап: время ответа в чате</title>
+<style>
+  :root { --bg:#f4f6f8; --surface:#fff; --surface-2:#e3e8ee; --border:#dde3ea; --text:#11161c; --text-dim:#66707c; --accent:#0f9488; --warn:#d4a017; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0b0f14; --surface:#161c24; --surface-2:#232b36; --border:#1f2731; --text:#e7ecf2; --text-dim:#8a96a3; --accent:#4fd1c5; --warn:#f1c40f; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui, sans-serif; }
+  .phone { max-width:420px; margin:0 auto; padding:16px; }
+  h2 { font-size:12px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.05em; margin:24px 0 8px; }
+  .msg { max-width:85%; padding:10px 12px; border-radius:14px; margin:6px 0; }
+  .me { margin-left:auto; background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
+  .bot { background:var(--surface); border:1px solid var(--border); border-bottom-left-radius:4px; }
+  .lat { font-size:12px; color:var(--text-dim); margin:2px 0 10px 4px; cursor:pointer; user-select:none; }
+  .lat b { color:var(--text); font-weight:600; }
+  .lat.slow b { color:var(--warn); }
+  details.lat summary { list-style:none; }
+  details.lat summary::-webkit-details-marker { display:none; }
+  .bars { margin-top:6px; display:grid; grid-template-columns:90px 1fr 44px; gap:3px 8px; align-items:center; max-width:320px; }
+  .bar { height:6px; border-radius:3px; background:var(--accent); }
+  .num { text-align:right; }
+  .cut { color:var(--text-dim); font-style:italic; }
+  .note { font-size:12px; color:var(--text-dim); border-left:2px solid var(--border); padding-left:8px; margin-top:12px; }
+</style>
+</head>
+<body>
+<div class="phone">
+
+  <h2>1. Быстрая команда — строка свёрнута</h2>
+  <div class="msg me">Который час?</div>
+  <div class="msg bot">Сейчас 21:47.</div>
+  <div class="lat">⚡ быстро · заговорил через <b>0,6 с</b></div>
+
+  <h2>2. Вопрос к агенту — тап раскрывает этапы</h2>
+  <div class="msg me">Чем заняться с ребёнком вечером, если дождь?</div>
+  <div class="msg bot">Можно устроить домашний квест: спрятать пять записок с подсказками по квартире… (дальше текст идёт, пока он говорит)</div>
+  <details class="lat" open>
+    <summary>заговорил через <b>1,9 с</b> · весь ответ 6,2 с ▾</summary>
+    <div class="bars">
+      <span>распознал</span><div class="bar" style="width:20%"></div><span class="num">0,4 с</span>
+      <span>понял</span><div class="bar" style="width:3%"></div><span class="num">0,02 с</span>
+      <span>первая фраза</span><div class="bar" style="width:55%"></div><span class="num">1,1 с</span>
+      <span>озвучка</span><div class="bar" style="width:18%"></div><span class="num">0,35 с</span>
+    </div>
+  </details>
+
+  <h2>3. Медленно — цифра подсвечена</h2>
+  <div class="msg me">Найди новости про запуск Starship</div>
+  <div class="msg bot">Последний запуск был…</div>
+  <div class="lat slow">заговорил через <b>4,8 с</b> · искал в интернете ▸</div>
+
+  <h2>4. Перебил «Джарвис»</h2>
+  <div class="msg me">Расскажи про чёрные дыры</div>
+  <div class="msg bot">Чёрная дыра — это область пространства, где гравитация настолько сильна, что… <span class="cut">— прервано</span></div>
+  <div class="lat">заговорил через <b>1,7 с</b> · замолчал через 0,3 с после «Джарвис»</div>
+  <div class="msg me">Включи музыку</div>
+
+  <p class="note">Строка есть только у ответов. На экране она не мешает: мелкий серый шрифт, по тапу раскрывается.
+  Порог «медленно» — 2,5 с (цель итерации).</p>
+</div>
+</body>
+</html>

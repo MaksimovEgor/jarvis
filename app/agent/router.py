@@ -18,12 +18,14 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 
+from app.agent.tools import weather
 from app.config import settings
 from app.music import devices, wave_spec, yandex
 from app.music.models import Kind
 from app.music.wave import spec_mood
-from app.timers import timers
+from app.timers import Alarm, timers
 
 
 logger = logging.getLogger("jarvis.router")
@@ -65,6 +67,104 @@ _LYRICS = re.compile(
     r"^(?:что|о\s+чем)\s+(?:он|она|они)\s+(?:поет|поют)$|^какие\s+(?:там\s+)?слова$"
 )
 _RESUME_BOOK = re.compile(r"^(?:продолжи|продолжай|давай\s+дальше)\s+(?:слушать\s+)?(?:аудио)?книгу$")
+# Справочное без LLM: время, дата, погода «сейчас», свои таймеры. Ловим смысл,
+# а не одну формулировку: короткая реплика = вежливое начало + ключ + хвост.
+# Лишние слова («какое время лучше для пробежки») — уже не справка, агенту.
+_ASK = r"^(?:(?:скажи|подскажи|скажите|подскажите|а|ну|слушай|так)\s+)*"
+_TAIL = r"(?:\s+(?:пожалуйста|подскажи|скажи))?$"
+_TIME = re.compile(
+    _ASK + r"(?:(?:сколько|который|какое)\s+(?:сейчас\s+)?(?:час|часов|время|времени)|время|сколько\s+на\s+часах)"
+    r"(?:\s+сейчас)?" + _TAIL
+)
+_DATE = re.compile(
+    _ASK + r"(?:сегодня\s+)?(?:(?:какое|какой|какая)\s+(?:сегодня\s+)?(?:число|день(?:\s+недели)?|дата)"
+    r"|что\s+(?:сегодня\s+)?за\s+день)(?:\s+(?:сегодня|и\s+день\s+недели))?" + _TAIL
+)
+# Только дом и «сейчас/сегодня»: город, «завтра», «на выходные» — агенту;
+# «нужен ли зонт», «холодно ли» — совет, а не цифры, тоже агенту.
+_WEATHER_NOW = re.compile(
+    _ASK + r"(?:(?:какая\s+)?(?:сейчас\s+|сегодня\s+)?погода|что\s+с\s+погодой|что\s+(?:там\s+)?на\s+улице|"
+    r"(?:сколько\s+градусов|какая\s+(?:сейчас\s+)?температура))"
+    r"(?:\s+(?:сейчас|сегодня|на\s+улице|за\s+окном))?" + _TAIL
+)
+_TIMERS = re.compile(
+    _ASK + r"(?:(?:какие|мои|есть\s+ли)\s+(?:у\s+меня\s+)?(?:есть\s+|стоят\s+)?(?:таймеры|напоминания|будильники)"
+    r"(?:\s+(?:стоят|есть|поставлены))?|что\s+(?:у\s+меня\s+)?по\s+(?:таймерам|напоминаниям|будильникам)|"
+    r"(?:таймеры|напоминания)(?:\s+есть)?)" + _TAIL
+)
+
+_WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+_WEEKDAYS_ACC = ("понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье")
+_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
+               "сентября", "октября", "ноября", "декабря")
+# «27» speakable прочёл бы «двадцать семь»; дате нужно порядковое.
+_ORDINALS = (
+    "первое", "второе", "третье", "четвёртое", "пятое", "шестое", "седьмое", "восьмое", "девятое", "десятое",
+    "одиннадцатое", "двенадцатое", "тринадцатое", "четырнадцатое", "пятнадцатое", "шестнадцатое",
+    "семнадцатое", "восемнадцатое", "девятнадцатое", "двадцатое",
+)
+_COUNTS = ("", "Один", "Два", "Три", "Четыре")
+TIMER_TEXT = "Время вышло, таймер сработал."
+
+
+def _ordinal(day: int) -> str:
+    if day <= 20:
+        return _ORDINALS[day - 1]
+    if day == 30:
+        return "тридцатое"
+    return f"{'двадцать' if day < 30 else 'тридцать'} {_ORDINALS[day % 10 - 1]}"
+
+
+def _plural(n: int, forms: tuple[str, str, str]) -> str:
+    n = abs(n)
+    if 10 <= n % 100 < 20:
+        return forms[2]
+    return forms[0] if n % 10 == 1 else forms[1] if 2 <= n % 10 <= 4 else forms[2]
+
+
+def say_time(now: datetime) -> str:
+    return f"Сейчас {now:%H:%M}."
+
+
+def say_date(now: datetime) -> str:
+    return f"Сегодня {_WEEKDAYS[now.weekday()]}, {_ordinal(now.day)} {_MONTHS_GEN[now.month - 1]}."
+
+
+def _degrees(match: re.Match[str]) -> str:
+    n = int(match.group(1))
+    return f"{n} {_plural(n, ('градус', 'градуса', 'градусов'))}"
+
+
+async def weather_now() -> str:
+    """Первая строка прогноза — «сейчас»: «Москва, сейчас: 12°, ощущается как 10°, …»."""
+    first = (await weather.run({})).splitlines()[0]
+    return re.sub(r"(-?\d+)°", _degrees, first)
+
+
+def _when(due: float, now: float) -> str:
+    at, today = datetime.fromtimestamp(due), datetime.fromtimestamp(now)
+    days = (at.date() - today.date()).days
+    if days == 0:
+        return f"в {at:%H:%M}"
+    if days == 1:
+        return f"завтра в {at:%H:%M}"
+    if days < 7:
+        return f"в {_WEEKDAYS_ACC[at.weekday()]} в {at:%H:%M}"
+    return f"{at.day} {_MONTHS_GEN[at.month - 1]} в {at:%H:%M}"
+
+
+def say_timers(alarms: list[Alarm], now: float) -> str:
+    upcoming = sorted((a for a in alarms if a.due > now), key=lambda a: a.due)
+    if not upcoming:
+        return "Таймеров и напоминаний нет."
+    n = len(upcoming)
+    head = _COUNTS[n] if n < len(_COUNTS) else f"Всего {n}"
+    items = "; ".join(
+        f"{_when(a.due, now)} — {'таймер' if a.text == TIMER_TEXT else a.text.rstrip('.')}" for a in upcoming
+    )
+    return f"{head}: {items}."
+
+
 _TIMER = re.compile(r"^(?:поставь\s+|заведи\s+|засеки\s+)?таймер\s+на\s+(.+)$")
 _RADIO = re.compile(rf"^{_PLAY_VERB}{_POLITE}\s+радио(?:станцию)?(?:\s+(.+))?$")
 _PLAY = re.compile(rf"^{_PLAY_VERB}{_POLITE}\s+(.+?)(?:\s+(?:на|с|из)\s+(?:ют[ую]бе?|ют[ую]ба|youtube))?$")
@@ -202,6 +302,15 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
     if _LLM_CLOUD.match(t):
         settings.llm_mode = "auto"
         return FastReply("Вернулся на облачную модель.", "llm_mode")
+    # Справочное — и на asus: ни плеер, ни экран не нужны.
+    if _TIME.match(t):
+        return FastReply(say_time(datetime.now()), "time")
+    if _DATE.match(t):
+        return FastReply(say_date(datetime.now()), "date")
+    if _WEATHER_NOW.match(t):
+        return FastReply(await weather_now(), "weather")
+    if _TIMERS.match(t):
+        return FastReply(say_timers(timers.list(), time.time()), "list_timers")
     if not devices.is_web(device):
         return None  # asus — сервер, играть там нечему; пусть ответит Hermes
     player = devices.player_for(device)
@@ -244,7 +353,7 @@ async def _try_fast(text: str, device: str) -> FastReply | None:
         seconds = _duration(m.group(1))
         if seconds is None:
             return None
-        timers.add(time.time() + seconds, "Время вышло, таймер сработал.", device)
+        timers.add(time.time() + seconds, TIMER_TEXT, device)
         return FastReply(f"Поставил таймер, сработает в {_clock(seconds)}.", "set_timer")
 
     if m := _RADIO.match(t):
