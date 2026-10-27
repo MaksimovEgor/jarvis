@@ -50,8 +50,9 @@ const subtitle = computed(() => {
     :style="{
       '--tint': color ?? 'var(--surface)',
       transform: swipe.dx.value ? `translateX(${swipe.dx.value}px)` : undefined,
+      opacity: swipe.dx.value ? swipe.opacity.value : undefined,
     }"
-    :class="{ 'mini--drag': swipe.dx.value }"
+    :class="{ 'mini--drag': swipe.instant.value }"
     aria-label="Плеер, открыть «Сейчас играет»"
     @click="onOpen"
     @touchstart.passive="swipe.onTouchStart"
@@ -104,9 +105,11 @@ const subtitle = computed(() => {
   background: linear-gradient(90deg, var(--tint), var(--surface) 75%);
   box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
   cursor: pointer;
+  // transform/opacity = FLY_MS в useSwipe
   transition:
     background 0.4s,
-    transform 0.25s;
+    transform 0.18s ease-out,
+    opacity 0.18s ease-out;
   -webkit-tap-highlight-color: transparent;
   touch-action: pan-y;
 

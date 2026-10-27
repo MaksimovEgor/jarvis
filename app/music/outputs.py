@@ -397,6 +397,17 @@ class WebOutput(Output):
         return self._volume
 
     def prefetch(self, track: Track) -> None:
-        if sources.is_downloadable(track):
-            task = asyncio.create_task(sources.download(track))
+        if not sources.is_downloadable(track):
+            return
+        task = asyncio.create_task(sources.download(track))
+        # Длинное (глава книги) начнётся с сохранённого места — его сам браузер не угадает.
+        if not track.is_long:
+            task.add_done_callback(lambda t: t.cancelled() or t.exception() or self._next_ready(track))
+        else:
             task.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+    def _next_ready(self, track: Track) -> None:
+        """Файл следующего уже на диске — браузер заранее скачает его к себе и
+        по «дальше» заиграет сразу. Следующий ли он ещё — сверит браузер по
+        upcoming (очередь могли переставить, пока качали)."""
+        self.set_meta({"next": {"ref": track.ref, "src": f"media/file/{track.ref}"}})

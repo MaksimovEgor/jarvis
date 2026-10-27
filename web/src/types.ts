@@ -62,6 +62,11 @@ export interface PlayerState {
   // «нет в Яндексе» — играет с YouTube/SoundCloud, хотя Яндекс подключён.
   note?: string | null
   upcoming?: UpcomingTrack[]
+  // Файл следующего уже скачан ядром — браузер берёт его заранее и по
+  // «дальше» играет сразу. Следующий ли он ещё — сверять с upcoming[0].
+  next?: { ref: string; src: string } | null
+  // Предыдущий — показать сразу по «назад»; src — если файл готов.
+  prev?: (UpcomingTrack & { src: string | null }) | null
 }
 
 export interface UpcomingTrack {

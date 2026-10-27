@@ -1,7 +1,16 @@
 import { computed, ref } from 'vue'
 
 import { clientLog, playerControl, playerEventsUrl, playerReport, rateTrack, type PlayerReport } from '../api'
-import type { FromWhere, PlayerEvent, PlayerState, Rating, TrackMeta, TurnEvent, TurnsEvent } from '../types'
+import type {
+  FromWhere,
+  PlayerEvent,
+  PlayerState,
+  Rating,
+  TrackMeta,
+  TurnEvent,
+  TurnsEvent,
+  UpcomingTrack,
+} from '../types'
 import { ensurePlayback } from './useAudioSession'
 import { SILENCE } from './usePlayer'
 
@@ -14,6 +23,24 @@ const STALL_MS = 10_000
 // нет — сторож выше не запускается, экран показывает трек в тишине. Столько
 // ждём 'playing' после play(); потом одна перезагрузка, потом — как завис.
 const START_MS = 6_000
+// Переключение показано сразу, до ответа ядра. Ядро ответило, а новый трек
+// за столько не пришёл — значит, не переключилось («дальше ничего нет»): откат.
+const CONFIRM_MS = 2_000
+
+type Neighbor = UpcomingTrack & { src: string | null }
+
+// Переключение, которое экран уже показал, а ядро ещё не подтвердило.
+interface Pending {
+  // seq до нажатия и тот, которым ядро подтвердит последнее (каждое «дальше» — +1).
+  base: number
+  target: number
+  // Сразу заиграли этот src (файл уже на ядре) — ядро пришлёт его же, не перезагружать.
+  src: string | null
+  // Звук уже не старого трека — при откате вернуть его с этой позиции.
+  audioChanged: boolean
+  position: number
+  timer: number | null
+}
 
 // Громкость <audio> на iPhone не меняется (только кнопками) — сообщаем ядру,
 // чтобы «тише» отвечало честно.
@@ -70,6 +97,15 @@ export function useMusic(
   let stallTimer: number | null = null
   // seq трека, который уже перезагружали из-за молчаливого старта.
   let reloadedSeq = -1
+  // Что играет <audio> — адрес ядра (media/file/…), даже когда сам элемент
+  // играет копию из памяти (blob:).
+  let src: string | null = null
+  let blobInUse: string | null = null
+  // Последний снимок ядра — из него соседи трека и откат.
+  let lastState: PlayerState | null = null
+  let pending: Pending | null = null
+  // Файл следующего, скачанный заранее: по «дальше» и в конце трека — без сети.
+  let preload: { src: string; url: string | null; abort: AbortController } | null = null
 
   const hasTrack = computed(() => title.value !== null)
 
@@ -78,6 +114,9 @@ export function useMusic(
   }
 
   function report(extra: Omit<PlayerReport, 'seq'> = {}): void {
+    // Пока ядро не подтвердило переключение, seq ещё старый — позиция и конец
+    // нового трека приписались бы старому.
+    if (pending) return
     lastReport = Date.now()
     void playerReport({ seq, position: audio.currentTime || 0, ...extra })
   }
@@ -114,7 +153,69 @@ export function useMusic(
     void playerReport({ seq, blocked: value })
   }
 
+  // --- звук: адрес ядра или заранее скачанная копия ------------------------
+
+  function setSource(next: string | null): void {
+    const oldBlob = blobInUse
+    const url = next !== null && preload?.src === next ? preload.url : null
+    src = next
+    blobInUse = url
+    if (next === null) {
+      audio.removeAttribute('src')
+      audio.load()
+    } else {
+      audio.src = url ?? next
+    }
+    if (oldBlob && oldBlob !== preload?.url) URL.revokeObjectURL(oldBlob)
+  }
+
+  function dropPreload(): void {
+    if (!preload) return
+    preload.abort.abort()
+    if (preload.url && preload.url !== blobInUse) URL.revokeObjectURL(preload.url)
+    preload = null
+  }
+
+  // Качаем файл следующего целиком в память: iOS атрибут preload у
+  // неиграющего <audio> игнорирует, а копия из памяти стартует мгновенно.
+  function preloadNext(state: PlayerState): void {
+    const next = state.next
+    const want = next && state.upcoming?.[0]?.ref === next.ref ? next.src : null
+    if (preload?.src === want) return
+    dropPreload()
+    if (!want) return
+    const entry = { src: want, url: null as string | null, abort: new AbortController() }
+    preload = entry
+    fetch(want, { signal: entry.abort.signal })
+      .then((resp) => {
+        if (!resp.ok) throw new Error(`Сервер ответил ${resp.status}`)
+        return resp.blob()
+      })
+      .then((blob) => {
+        if (preload === entry) entry.url = URL.createObjectURL(blob)
+      })
+      .catch(() => undefined)
+  }
+
+  // Файл следующего уже на ядре — по «дальше» можно играть, не дожидаясь ответа.
+  function readySrc(ref: string): string | null {
+    const next = lastState?.next
+    return next && next.ref === ref ? next.src : null
+  }
+
   function onState(state: PlayerState): void {
+    lastState = state
+    if (pending) {
+      // Снимки старого трека и промежуточных «дальше» — экран уже впереди.
+      if (state.seq < pending.target) return
+      const adopt = pending.src !== null && state.src === pending.src
+      settle()
+      if (adopt) {
+        // Уже играет то, что выбрало ядро, — не перезагружать.
+        seq = state.seq
+        if (state.start > 1) audio.currentTime = state.start
+      }
+    }
     if (state.seq !== seq) {
       seq = state.seq
       pauseSelf()
@@ -125,11 +226,8 @@ export function useMusic(
       if (state.src) {
         pendingStart = state.start
         isLoading.value = true
-        audio.src = state.src
-      } else {
-        audio.removeAttribute('src')
-        audio.load()
       }
+      setSource(state.src)
     }
     trackRef.value = state.ref ?? null
     rating.value = state.rating ?? null
@@ -150,6 +248,90 @@ export function useMusic(
     wantPlaying.value = !state.paused && state.src !== null
     updateSession()
     apply()
+    preloadNext(state)
+  }
+
+  // --- переключение сразу, ядро подтвердит ----------------------------------
+
+  // Показать соседний трек и, если его файл уже на ядре, сразу играть.
+  function jump(to: Neighbor, upcoming: UpcomingTrack[]): void {
+    const was = meta.value
+    if (!pending) {
+      pending = { base: seq, target: seq, src: null, audioChanged: false, position: audio.currentTime || 0, timer: null }
+    }
+    pending.target += 1
+    title.value = to.song
+    trackRef.value = trackRef.value !== null ? to.ref : null
+    rating.value = null
+    from.value = null
+    position.value = 0
+    duration.value = 0
+    meta.value = {
+      song: to.song,
+      artist: to.artist,
+      cover: to.cover,
+      coverCrop: to.coverCrop ?? true,
+      service: was?.service ?? null,
+      quality: null,
+      note: null,
+      upcoming,
+    }
+    isLoading.value = true
+    wantPlaying.value = true
+    pauseSelf()
+    // Только на первом шаге: через два «дальше» файл заранее не готов.
+    const ready = pending.target === seq + 1 ? to.src : null
+    pending.src = ready
+    if (ready) {
+      pending.audioChanged = true
+      pendingStart = 0
+      setSource(ready)
+      apply()
+    }
+    updateSession()
+  }
+
+  function settle(): void {
+    if (pending?.timer) clearTimeout(pending.timer)
+    pending = null
+  }
+
+  // Ядро не переключило (или запрос упал) — вернуть то, что оно считает текущим.
+  function revert(): void {
+    const was = pending
+    if (!was || !lastState) return settle()
+    settle()
+    if (was.audioChanged) {
+      seq = -1 // заставить onState перезагрузить звук
+      onState(lastState.seq === was.base ? { ...lastState, start: was.position } : lastState)
+      return
+    }
+    if (lastState.seq === seq) {
+      // Звук старого трека на месте — вернуть только экран.
+      title.value = lastState.title
+      position.value = audio.currentTime || 0
+      duration.value = Number.isFinite(audio.duration) ? audio.duration : 0
+      isLoading.value = false
+    }
+    onState(lastState)
+  }
+
+  // Ждём снимок ядра: запрос упал — откат сразу, ответ пришёл — ещё CONFIRM_MS.
+  function confirm(request: Promise<unknown>): void {
+    request.then(
+      () => {
+        if (!pending) return
+        if (pending.timer) clearTimeout(pending.timer)
+        pending.timer = window.setTimeout(revert, CONFIRM_MS)
+      },
+      () => revert(),
+    )
+  }
+
+  function current(): UpcomingTrack | null {
+    const m = meta.value
+    if (!m || !title.value) return null
+    return { ref: trackRef.value ?? title.value, song: m.song, artist: m.artist, cover: m.cover, coverCrop: m.coverCrop }
   }
 
   function onEvent(event: PlayerEvent): void {
@@ -158,7 +340,7 @@ export function useMusic(
         onState(event)
         break
       case 'seek':
-        if (event.seq === seq) audio.currentTime = event.position
+        if (event.seq === seq && !pending) audio.currentTime = event.position
         break
       case 'volume':
         if (volumeSupported) audio.volume = event.level / 100
@@ -295,6 +477,16 @@ export function useMusic(
     if (hasTrack.value) report({ ended: true })
   })
   audio.addEventListener('error', () => {
+    if (blobInUse && src) {
+      // Копия из памяти не заиграла — берём тот же файл у ядра.
+      clientLog(`копия не играет, беру у ядра: ${title.value}`)
+      const at = audio.currentTime || 0
+      dropPreload()
+      pendingStart = at
+      setSource(src)
+      apply()
+      return
+    }
     if (hasTrack.value && audio.getAttribute('src')) {
       isLoading.value = false
       report({ error: audio.error?.message || `код ${audio.error?.code ?? '?'}` })
@@ -404,11 +596,17 @@ export function useMusic(
   }
 
   function next(): void {
-    void playerControl('next').catch(() => undefined)
+    const upcoming = meta.value?.upcoming ?? []
+    if (upcoming[0]) jump({ ...upcoming[0], src: readySrc(upcoming[0].ref) }, upcoming.slice(1))
+    confirm(playerControl('next'))
   }
 
   function previous(): void {
-    void playerControl('previous').catch(() => undefined)
+    const prev = lastState?.prev
+    const now = current()
+    if (pending) pending.target += 1 // после «дальше» назад — просто ждём ядро
+    else if (prev && now) jump(prev, [now, ...(meta.value?.upcoming ?? [])])
+    confirm(playerControl('previous'))
   }
 
   function stop(): void {
@@ -424,10 +622,18 @@ export function useMusic(
     void rateTrack(liked ? 'none' : 'like', trackRef.value).catch(() => (rating.value = liked ? 1 : null))
   }
 
+  // Дизлайк переключает трек на ядре — показываем следующий сразу.
   function dislike(): void {
-    if (!trackRef.value) return
+    const ref = trackRef.value
+    if (!ref) return
     rating.value = -1
-    void rateTrack('dislike', trackRef.value).catch(() => (rating.value = null))
+    const upcoming = meta.value?.upcoming ?? []
+    if (!pending && upcoming[0]) {
+      jump({ ...upcoming[0], src: readySrc(upcoming[0].ref) }, upcoming.slice(1))
+      confirm(rateTrack('dislike', ref))
+    } else {
+      void rateTrack('dislike', ref).catch(() => (rating.value = null))
+    }
   }
 
   // «Отменить» после дизлайка: трек уже переключён, просто снимаем оценку.

@@ -153,8 +153,12 @@ const swipe = useSwipe({
     <CoverArt
       v-if="panel === 'cover'"
       class="np__cover"
-      :class="{ 'np__cover--drag': swipe.dx.value }"
-      :style="swipe.dx.value ? { transform: `translateX(${swipe.dx.value}px) rotate(${swipe.dx.value / 40}deg)` } : undefined"
+      :class="{ 'np__cover--drag': swipe.instant.value }"
+      :style="
+        swipe.dx.value
+          ? { transform: `translateX(${swipe.dx.value}px) rotate(${swipe.dx.value / 40}deg)`, opacity: swipe.opacity.value }
+          : undefined
+      "
       :src="meta.cover"
       :crop="meta.coverCrop"
       :live="live"
@@ -353,7 +357,10 @@ const swipe = useSwipe({
     margin: clamp(8px, 2.5dvh, 24px) auto 0;
     border-radius: 18px;
     box-shadow: 0 24px 60px rgb(0 0 0 / 55%);
-    transition: transform 0.25s;
+    // = FLY_MS в useSwipe
+    transition:
+      transform 0.18s ease-out,
+      opacity 0.18s ease-out;
 
     &--drag {
       transition: none;

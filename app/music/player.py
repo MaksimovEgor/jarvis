@@ -237,6 +237,7 @@ class Player:
                 "quality": None,
                 **_display(track),
                 "upcoming": self._upcoming_meta(),
+                "prev": self._prev_meta(),
             })
             if where in ("liked", "cache", "net"):
                 asyncio.create_task(self._publish_audio_info(track))
@@ -700,6 +701,15 @@ class Player:
             if track.cover:
                 library.upsert(track)  # обложку Яндекса /media/cover берёт из библиотеки
         return [{"ref": t.ref, **_display(t)} for t in upcoming]
+
+    def _prev_meta(self) -> dict[str, Any] | None:
+        """Предыдущий — экран покажет его сразу по «назад», не дожидаясь ядра;
+        src — если файл на диске и браузер может заиграть его сам."""
+        if self._pos <= 0:
+            return None
+        track = self._queue[self._pos - 1]
+        ready = sources.is_downloadable(track) and not track.is_long and storage.where(track.ref) != "net"
+        return {"ref": track.ref, "src": f"media/file/{track.ref}" if ready else None, **_display(track)}
 
     def _publish_upcoming(self) -> None:
         if self.current is not None:

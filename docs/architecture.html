@@ -478,7 +478,6 @@ flowchart LR
       <p class="sub">Cron «Сервер: ежедневная сводка 09:00» (<code>scripts/hermes-digest/</code>): пороги, известный шум и повторы проверяет <code>server-digest.py</code>, состояние между запусками — в <code>~/.hermes/scripts/.server-digest.state.json</code>. Всё в норме → пустой stdout → Hermes модель не зовёт (0 токенов). Есть новое или хуже → агент без инструментов (<code>enabled_toolsets: todo, no_mcp</code>, reasoning low) пишет 2–5 строк в Telegram. Раньше агент с terminal и <code>context_from: self</code> сам расследовал сервер: 145–260k токенов в день.</p>
       <p class="sub">Резерв модели (<code>fallback_providers</code>, ставит <code>scripts/hermes-fallback/apply.sh</code>, основной профиль и dj): основной провайдер упал (402, 429, 5xx, сеть) → nous <code>stepfun/step-3.7-flash:free</code> → nous <code>upstage/solar-pro4:free</code>; следующий ход снова пробует основной. Резерв медленнее (тест: 13–43 с против 5 с), у бесплатного nous свой лимит (429). Служебные вызовы (заголовок сессии) резерв не используют.</p>
       <p class="sub">История конфигурации (<code>scripts/hermes-git/</code>): локальный git, каталог <code>~/.hermes-history</code>, рабочее дерево <code>~/.hermes</code> (своего .git в нём нет — Hermes и coder его не видят). Whitelist: конфиги, SOUL и память (.md) основного профиля и профилей, скиллы, скрипты, плагины, определения cron (<code>.history/cron-jobs.json</code>, без счётчиков). Без .env, auth.json, баз и логов. Снимок — user-таймер <code>hermes-snapshot</code> раз в час, коммит только при изменениях; смотреть и откатывать — <code>~/.local/bin/hermes-git log -p</code> / <code>checkout &lt;commit&gt; -- config.yaml</code>. Правки, которые Hermes делает сам (скиллы, память), тоже видны.</p>
-      <p class="sub">Резерв модели (<code>fallback_providers</code>, ставит <code>scripts/hermes-fallback/apply.sh</code>, основной профиль и dj): основной провайдер упал (402, 429, 5xx, сеть) → nous <code>stepfun/step-3.7-flash:free</code> → nous <code>upstage/solar-pro4:free</code>; следующий ход снова пробует основной. Резерв медленнее (тест: 13–43 с против 5 с), у бесплатного nous свой лимит (429). Служебные вызовы (заголовок сессии) резерв не используют.</p>
       <div class="diagram"><pre class="mermaid">
 flowchart TD
   S["run_hermes(session, text)"] --> C{"последняя реплика<br/>больше 10 мин назад?"}
@@ -787,6 +786,31 @@ sequenceDiagram
         <li>Вкладку перезагрузили посреди хода — событие <code>turns</code> вернёт его в чат со спиннером.</li>
         <li>Готовое при свёрнутой вкладке: для фоновых ходов и ошибок — пуш. Для обычного ответа пуша нет, он будет на экране при возврате.</li>
         <li>Выкатка: <code>ExecStop → wait_idle.sh</code> ждёт <code>/admin/busy = 0</code> до 120 с, SSE закрываются через 5 с.</li>
+      </ul>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="instant-switch">
+      <h2>Переключение трека без ожидания ядра</h2>
+      <p class="sub">Свайп, «дальше»/«назад» и дизлайк экран показывает сразу, ядро подтверждает потом. Файл следующего браузер скачивает заранее.</p>
+      <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant B as Браузер (useMusic)
+  participant C as jarvis-core (Player + WebOutput)
+  C->>C: _play_index → prefetch(следующий) качает файл на диск
+  C-->>B: state {next: {ref, src: media/file/…}, prev: {…, src|null}}
+  B->>C: GET media/file/… (целиком в память → blob:)
+  Note over B: свайп/кнопка: карточка улетает (180 мс), экран — upcoming[0],<br/>звук — копия из памяти, сразу
+  B->>C: POST /player/control next
+  C-->>B: state seq+1, src тот же → не перезагружать, только сверить
+  Note over B: ответ пришёл, а нового seq нет 2 с (или запрос упал) → откат к последнему снимку
+      </pre></div>
+      <ul class="plain">
+        <li>Пока переключение не подтверждено, браузер не шлёт отчёты: seq ещё старый, позиция нового трека приписалась бы старому.</li>
+        <li><code>next</code> браузер берёт, только если <code>next.ref = upcoming[0].ref</code> — очередь могли переставить, пока качали.</li>
+        <li>Длинное (главы книг) не предзагружается в браузер: старт с сохранённого места знает только ядро.</li>
+        <li>Копия из памяти не заиграла — тот же файл по сети у ядра, без пропуска трека.</li>
+        <li>Та же копия срабатывает и при обычном конце трека: следующий стартует без сети.</li>
       </ul>
     </section>
 
