@@ -574,7 +574,7 @@ flowchart TD
         <div class="note"><h3>iPhone</h3><p>Первый <code>play()</code> возможен только в жесте — любой тап «разблокирует» оба &lt;audio&gt; тишиной. Громкость меняется только кнопками. Длинное с YouTube — HLS; если HLS у видео нет (сказки, короткие книги) — файл целиком (<code>/media/file</code>). yt-dlp разгадывает подпись YouTube скриптом EJS (<code>--remote-components ejs:github</code>) — без него часть видео «not available». В фоне Safari рвёт SSE.</p></div>
         <div class="note"><h3>Ссылки googlevideo</h3><p>Привязаны к IP — поэтому и получение ссылки, и чтение идут через один SOCKS (<code>rdns=True</code>, <code>encoded=True</code>). 403 → ссылка берётся заново, второй раз 403 → 502.</p></div>
         <div class="note"><h3>Кнопки на экране и экране блокировки</h3><p><code>POST /player/control</code>: pause, resume, next, previous, stop. Перемотку браузер делает сам и сообщает позицию отчётом. ♡ / 👎 — <code>POST /library/rate</code>.</p></div>
-        <div class="note"><h3>Аудиосессия iOS</h3><p>Открытый микрофон (кнопка или «Джарвис») переводит iOS в «звонок» — вывод тише, Bluetooth в гарнитуре, и обратно iOS возвращается не всегда. <code>useAudioSession</code> задаёт <code>navigator.audioSession.type</code> явно: микрофон открыт — <code>play-and-record</code>, закрыт и перед каждым <code>play()</code> — <code>playback</code>. Автостоп записи анализирует тишину в своём <code>AudioContext</code> и закрывает его после записи.</p></div>
+        <div class="note"><h3>Аудиосессия iOS</h3><p>Открытый микрофон (кнопка или «Джарвис») переводит iOS в «звонок» — вывод тише, Bluetooth в гарнитуре, и обратно iOS возвращается не всегда. <code>useAudioSession</code> задаёт <code>navigator.audioSession.type</code> явно: микрофон открыт — <code>play-and-record</code>, закрыт и перед каждым <code>play()</code> — <code>playback</code>. Автостоп записи анализирует тишину в своём <code>AudioContext</code> и закрывает его после записи. «Джарвис» (<code>useWakeWord</code>) держит микрофон через флаг сессии и отпускает его ровно один раз — и на <code>onend</code>, и на ошибке <code>not-allowed</code>: после неё iOS не присылает <code>onend</code>, и раньше сессия навсегда застревала в «звонке».</p></div>
         <div class="note"><h3>Сторож зависаний</h3><p>Браузер: <code>&lt;audio&gt;</code> ждёт данные &gt; 10 с, хотя должен играть → <code>report {stalled}</code>. После <code>play()</code> нет <code>playing</code> 6 с (iOS молча не стартует трек) → один раз <code>load()</code> с той же позиции, снова тишина → <code>report {stalled}</code>. Ядро: экран открыт, не пауза, нет хода, а позиция не растёт 25 с → то же. Оба пути — <code>_on_end("stall")</code>: следующий трек и «stalled» в журнале.</p></div>
       </div>
     </section>
@@ -585,8 +585,8 @@ flowchart TD
       <p class="sub">Какой трек следующий, решает ядро за миллисекунды (<code>wave.py</code>). Профиль Hermes «dj» — отдельный процесс со своей памятью — в фоне подкладывает зёрна поиска и размечает энергию. Волна его никогда не ждёт.</p>
       <div class="diagram"><pre class="mermaid">
 flowchart TD
-  V["«включи музыку» / play_wave(mood)"] --> F{"Wave.first:<br/>лайк на диске под слот"}
-  F -- "есть" --> P["играет сразу (< 1 с)"]
+  V["«включи музыку» / play_wave(mood)"] --> F{"Wave.first: любой лайк под слот,<br/>не звучавший 7 дней"}
+  F -- "есть" --> P["играет (с диска сразу, нет — качается ~1 с;<br/>не скачался — старт с Wave.more)"]
   F -- "нет" --> M0["Wave.more(tag=False):<br/>строгое настроение → зёрна dj / запасной запрос"]
   M0 --> P
   V -. "фоном" .-> SEEDS["taste.refresh_seeds_soon(slot, mood)<br/>dj → 4 similar + 5 discover → library.seeds"]
@@ -594,7 +594,8 @@ flowchart TD
   R --> POOL["пул: лайки · радио YT Music от лайков и зёрен ·<br/>поиск YT Music по discover-зёрнам"]
   POOL --> EN["taste.energies_for: dj размечает энергию 1–5<br/>(пачки по 20 параллельно, ≤ 45 с)"]
   EN --> C["compose(): доли 30/50/20, бан, недавнее 3 ч,<br/>энергия под слот и настроение, штрафы,<br/>исполнитель не чаще раза в 4"]
-  C --> Q["+8 в очередь, следующий качается заранее"]
+  C --> UP["sources.upgrade: песня YouTube (AAC 128) →<br/>та же с Яндекса (имя, обратная проверка, ±15 с)"]
+  UP --> Q["+8 в очередь, следующий качается заранее"]
   POOL -- "сеть молчит" --> OFF["лайки + дослушанное в кэше"]
   OFF --> C
       </pre></div>
@@ -621,7 +622,7 @@ flowchart TD
   S -- "нет" --> YT["+ YouTube"] --> S2{"≥ 0.8?"}
   S2 -- "нет" --> SC["+ SoundCloud (yt-dlp scsearch)"] --> P
   S2 -- "да" --> P
-  P --> D["sources.download: Яндекс — MP3 320 в cache/;<br/>лайк — FLAC (get-file-info, подпись, AES-CTR, ремукс ffmpeg) в liked/"]
+  P --> D["sources.download: всё через get-file-info (подпись, AES-CTR):<br/>кэш — quality=nq (AAC 192) в cache/; лайк — lossless (FLAC, ремукс ffmpeg) в liked/;<br/>не вышло — старый download-info (MP3)"]
   D --> F["/media/file/&lt;ref&gt; → &lt;audio&gt;"]
   W["play_wave(spec)"] --> RS["rotor/session/new: seeds = станция + settingMoodEnergy/Diversity/Language"]
   RS --> WQ["очередь; фидбек trackStarted / trackFinished / skip"]
@@ -629,7 +630,7 @@ flowchart TD
       <div class="grid2">
         <div class="note"><h3>Вход в Яндекс</h3><p>Код устройства (ya.ru/device) из карточки в «Моей музыке». Токен — <code>data/yandex_token.json</code> (600). Сломался — <code>broken</code>, всё играет с YouTube. Лайки Яндекса импортируются при входе и раз в сутки; оценки из Джарвиса ставятся и в Яндексе.</p></div>
         <div class="note"><h3>Волна с настройками</h3><p>Станции: <code>user:onyourwave</code>, занятия <code>activity:*</code> (12), эпохи <code>epoch:*</code>, жанры <code>genre:*</code> (161), настроения <code>mood:*</code>. Настройки: настроение (бодрое/весёлое/спокойное/грустное), характер (любимое/незнакомое/популярное), язык (русский/иностранный/без слов). С настройками волну ведёт только Яндекс; «просто волна» — Яндекс 50 % + лайки 25 % + YT Music 15 % + dj 10 %. Старый API rotor/station/*/settings3 отвечает 415 — используется сессионный.</p></div>
-        <div class="note"><h3>Качество и место</h3><p>Кэш — MP3 320 (~9 МБ), лайки — FLAC 24 бит / 44,1 кГц (~45 МБ). Не вышел FLAC — MP3 320. Качество в плеере — по самому файлу (<code>ffprobe</code>). Ref: <code>ym-&lt;id&gt;</code>, <code>sc-&lt;id&gt;</code>, YouTube — id видео (11 символов; <code>ym-12345678</code> тоже 11 — проверять префикс первым).</p></div>
+        <div class="note"><h3>Качество и место</h3><p>С октября 2026 Яндекс отдаёт этому аккаунту максимум 192 кбит/с на всё (и на lossless, и в download-info). Поэтому кэш — AAC 192 из get-file-info (~6 МБ, лучше MP3 192), лайки — FLAC, если Яндекс снова начнёт отдавать, иначе тоже AAC 192. YouTube — AAC 128 (itag 140), поэтому песни YouTube в волне и миксах подменяются той же записью с Яндекса (<code>sources.upgrade</code>; уже скачанное с YouTube не трогаем). Качество в плеере — по самому файлу (<code>ffprobe</code>). Ref: <code>ym-&lt;id&gt;</code>, <code>sc-&lt;id&gt;</code>, YouTube — id видео (11 символов; <code>ym-12345678</code> тоже 11 — проверять префикс первым).</p></div>
         <div class="note"><h3>Тексты</h3><p><code>lyrics.py</code>: Яндекс <code>tracks_lyrics</code> (LRC построчно) → LRCLIB (<code>lrclib.net/api/get</code>, затем <code>search</code>), кэш <code>data/music/lyrics/&lt;ref&gt;.json</code> («нет текста» — на сутки). Подсветка строки — на клиенте по позиции &lt;audio&gt;, тап — перемотка. Голосом «покажи текст» → SSE <code>{type:"ui", open:"lyrics"}</code>.</p></div>
         <div class="note"><h3>Поиск и очередь</h3><p><code>catalog.py</code>, вкладки: Яндекс (лучший, треки, исполнители, альбомы, плейлисты), YouTube (YT Music + видео), SoundCloud, Книги / Подкасты (Яндекс <code>search type=podcast</code>, делим по <code>album.type</code>; запасной — YouTube), Детям (детские станции + жанр <code>childrensliterature</code>…). Кэш 10 мин (Яндекс отвечал 429). Книга — с недослушанной главы (<code>positions.resume_index</code>), подкаст — с последнего выпуска. Очередь: <code>/player/queue</code>, перестановка, удаление, «играть следующим».</p></div>
         <div class="note"><h3>Вход в веб</h3><p><code>app/web_auth.py</code>: страница <code>/login</code>, cookie <code>jarvis_auth</code> на год с продлением, bcrypt-хэш в <code>WEB_AUTH_HASH</code>. Basic auth в Caddy убран — PWA на iPhone его окно не показывала (чёрный экран).</p></div>

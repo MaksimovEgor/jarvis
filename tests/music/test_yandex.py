@@ -27,8 +27,8 @@ def test_mood_presets_roundtrip() -> None:
         assert spec_mood(spec) == mood
 
 
-async def test_download_falls_back_to_mp3_when_lossless_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def lossless(tid, folder, name):  # noqa: ANN001
+async def test_download_falls_back_to_mp3_when_file_info_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def lossless(tid, folder, name, quality):  # noqa: ANN001
         raise RuntimeError("403 sign")
 
     async def mp3(tid, folder, name):  # noqa: ANN001
@@ -36,7 +36,7 @@ async def test_download_falls_back_to_mp3_when_lossless_fails(tmp_path: Path, mo
         path.write_bytes(b"ID3")
         return path
 
-    monkeypatch.setattr(yandex, "_download_lossless", lossless)
+    monkeypatch.setattr(yandex, "_download_file", lossless)
     monkeypatch.setattr(yandex, "_download_mp3", mp3)
     path = await yandex.download("ym-1", tmp_path, "lossless")
     assert path.suffix == ".mp3"

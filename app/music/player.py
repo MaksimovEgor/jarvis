@@ -4,7 +4,7 @@
 
     play_youtube("Queen") ─► search → [трек]  ─► играет сразу
                                    └► mix (фоном) ─► +~20 похожих в очередь
-    play_wave(mood)       ─► Wave.first() (лайк с диска) ─► играет сразу
+    play_wave(mood)       ─► Wave.first() (лайк, не звучавший неделю) ─► играет сразу
                                    └► Wave.more() (фоном) ─► досыпает, когда впереди < 3
     выход сообщил «трек кончился» ─► следующий в очереди (скачан заранее)
 
@@ -291,7 +291,7 @@ class Player:
             return
         self._mixing = True
         try:
-            tracks = self._playable(await sources.similar(seed))
+            tracks = self._playable(await sources.upgrade(self._playable(await sources.similar(seed))))
         except Exception:
             logger.exception("Не получилось получить микс для «%s»", seed.title)
             return
@@ -391,8 +391,15 @@ class Player:
             try:
                 track = await self._start_queue(tracks)
             except RuntimeError:
-                self.wave = None
-                return "Не получилось включить волну — треки не загрузились."
+                # Лайк не скачался — начнём с подборки волны.
+                more = await wave.more([], REFILL_BELOW, tag=False) if first else []
+                try:
+                    track = await self._start_queue(more) if more else None
+                except RuntimeError:
+                    track = None
+                if track is None:
+                    self.wave = None
+                    return "Не получилось включить волну — треки не загрузились."
         label = wave.label or MOOD_RU[wave.mood]
         what = f" — {label}" if label else ""
         return f"Включаю твою волну{what}: {short_title(track.title)}."

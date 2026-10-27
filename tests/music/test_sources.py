@@ -65,3 +65,33 @@ def test_is_song() -> None:
     assert sources.is_song(yt("a"))
     assert not sources.is_song(Track(title="r", source="radio", ref="http://x"))
     assert not sources.is_song(Track(title="book", source="youtube", ref="abcdefghijk", kind="audiobook"))
+
+
+async def test_upgrade_swaps_youtube_for_same_yandex_song(monkeypatch: pytest.MonkeyPatch) -> None:
+    same = Track(title="Everlong", source="yandex", ref="ym-1", artist="Foo Fighters", duration=250, service="yandex")
+    live = Track(title="Everlong (Live)", source="yandex", ref="ym-2", artist="Foo Fighters", duration=320,
+                 service="yandex")
+
+    async def search(query: str, limit: int = 3) -> list[Track]:
+        return [live, same] if "Everlong" in query else [live]
+
+    monkeypatch.setattr(yandex, "is_on", lambda: True)
+    monkeypatch.setattr(yandex, "search", search)
+    song = Track(title="Foo Fighters - Everlong (Official Video)", source="youtube", ref="eBG7P-K-r1Y",
+                 artist="Foo Fighters", duration=252, origin="wave")
+    other = Track(title="Unknown jam", source="youtube", ref="aaaaaaaaaaa", artist="Nobody", duration=200)
+    out = await sources.upgrade([song, other])
+    assert [t.ref for t in out] == ["ym-1", "aaaaaaaaaaa"]
+    assert out[0].origin == "wave"
+
+
+async def test_upgrade_rejects_different_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    edit = Track(title="Everlong", source="yandex", ref="ym-1", artist="Foo Fighters", duration=180, service="yandex")
+
+    async def search(query: str, limit: int = 3) -> list[Track]:
+        return [edit]
+
+    monkeypatch.setattr(yandex, "is_on", lambda: True)
+    monkeypatch.setattr(yandex, "search", search)
+    song = Track(title="Everlong", source="youtube", ref="eBG7P-K-r1Y", artist="Foo Fighters", duration=250)
+    assert (await sources.upgrade([song]))[0].ref == "eBG7P-K-r1Y"

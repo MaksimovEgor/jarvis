@@ -5,9 +5,11 @@
     resolve("кино группа крови") ─► Яндекс и YT Music параллельно
         ранжирование: (совпадение с запросом, округлено до 0.1) → приоритет источника
         ничего приличного → YouTube → SoundCloud
-    download(track)              ─► Яндекс: MP3 320 в кэш / FLAC в лайки
+    download(track)              ─► Яндекс: AAC в кэш / FLAC (или AAC) в лайки
                                     YouTube, SoundCloud: yt-dlp в кэш
     similar(track)               ─► Яндекс: станция track:<id>; YouTube: Mix
+    upgrade(tracks)              ─► песни YouTube (AAC 128) → те же с Яндекса,
+                                    если нашлись уверенно (волна, миксы)
 
 Совпадение — доля слов запроса в «исполнитель + название». Кавер, лайв,
 ремикс, караоке, которых нет в запросе, — штраф: лучше точная песня с YouTube,
@@ -19,11 +21,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Awaitable
 
 from app.music import storage, yandex, youtube
-from app.music.models import Kind, Service, Track
+from app.music.models import Kind, Service, Track, clean_title, split_title
 
 logger = logging.getLogger("jarvis.sources")
 
@@ -97,12 +100,12 @@ def is_song(track: Track) -> bool:
 
 
 async def download(track: Track, liked: bool = False, timeout: float = 180) -> Path:
-    """Файл трека на диске. Яндекс: лайк — FLAC в liked/, иначе MP3 320 в кэш."""
+    """Файл трека на диске. Яндекс: лайк — FLAC в liked/ (если отдаст), иначе AAC в кэш."""
     if track.source == "yandex":
         if path := storage.path_for(track.ref):
             return path
         folder = storage.liked_dir() if liked and track.kind == "music" else storage.cache_dir()
-        path = await asyncio.wait_for(yandex.download(track.ref, folder, "lossless" if liked else "mp3"), timeout)
+        path = await asyncio.wait_for(yandex.download(track.ref, folder, "lossless" if liked else "nq"), timeout)
         if not liked:
             storage.prune(keep=path)
         return path
@@ -124,6 +127,53 @@ async def save_liked(track: Track) -> None:
     if not storage.pin(track.ref):
         await download(track)
         storage.pin(track.ref)
+
+
+# Та же запись, а не другая версия: длительность расходится не больше чем на столько.
+SAME_LENGTH_SECONDS = 15
+UPGRADE_PARALLEL = 4
+
+
+def _song_query(track: Track) -> str:
+    """«Foo Fighters - Everlong (Official Video)» → «Foo Fighters Everlong»."""
+    song, artist = split_title(clean_title(track.title), track.artist)
+    return f"{artist or ''} {song}".strip()
+
+
+def same_song(original: Track, candidate: Track) -> bool:
+    query = _song_query(original)
+    if match_score(query, candidate) < MATCH_THRESHOLD:
+        return False
+    # И обратно: «Song (Live)» на Яндексе — не «Song» с YouTube.
+    back = f"{candidate.artist or ''} {candidate.title}"
+    if match_score(back, Track(title=query, source=original.source, ref=original.ref)) < MATCH_THRESHOLD:
+        return False
+    if original.duration and candidate.duration:
+        return abs(original.duration - candidate.duration) <= SAME_LENGTH_SECONDS
+    return True
+
+
+async def _upgrade_one(track: Track, gate: asyncio.Semaphore) -> Track:
+    if track.source != "youtube" or track.kind != "music" or track.is_long or storage.where(track.ref) != "net":
+        return track
+    async with gate:
+        found = await _safe(yandex.search(_song_query(track)), "Яндекс")
+    better = next((t for t in found if same_song(track, t)), None)
+    return replace(better, origin=track.origin) if better else track
+
+
+async def upgrade(tracks: list[Track]) -> list[Track]:
+    """Песни YouTube (AAC 128) — на те же с Яндекса (FLAC/AAC 192), если
+    нашлись уверенно. Уже скачанное с YouTube не трогаем — играет с диска."""
+    if not yandex.is_on():
+        return tracks
+    gate = asyncio.Semaphore(UPGRADE_PARALLEL)
+    out = await asyncio.gather(*(_upgrade_one(t, gate) for t in tracks))
+    swapped = sum(a.ref != b.ref for a, b in zip(tracks, out))
+    if swapped:
+        logger.info("YouTube → Яндекс: %d из %d", swapped, len(tracks))
+    # Две версии с YouTube могут найтись одной песней Яндекса.
+    return list({t.ref: t for t in out}.values())
 
 
 async def similar(track: Track) -> list[Track]:

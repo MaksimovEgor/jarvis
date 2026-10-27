@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from app.music import storage, taste, yandex, youtube
+from app.music import sources, storage, taste, yandex, youtube
 from app.music.library import ArtistStats, TrackInfo, artist_key, library
 from app.music.models import Mood, Outcome, Slot, Track, WaveSpec, slot_at
 
@@ -93,6 +93,10 @@ DISLIKED_ARTIST_FACTOR = 0.25
 UNTAGGED_FACTOR = 0.5
 AHEAD = 8
 REFILL_BELOW = 3
+# Первым трек волны — любой лайк, не звучавший неделю. Раньше брали только
+# лежащие на диске (их единицы из тысячи) — волна начиналась с одного и того же.
+OPENER_RECENT_HOURS = 7 * 24
+OPENER_POOL = 2000
 # Без лайков и зёрен — с чего начать (музыкальный вкус хозяина из памяти Hermes).
 COLD_START: dict[Mood, str] = {
     "auto": "Foo Fighters", "energetic": "rock hits energetic", "calm": "acoustic rock ballads",
@@ -246,12 +250,14 @@ class Wave:
         )
 
     async def first(self) -> Track | None:
-        """Мгновенный старт: лайк, который уже лежит на диске (кроме волны с
-        настройками — её начинает Яндекс)."""
+        """Быстрый старт без сети на выбор: лайк, не звучавший неделю (не на
+        диске — плеер скачает за секунду-две). Волну с настройками начинает Яндекс."""
         if self.yandex_only:
             return None
-        local = [i for i in library.liked(limit=500) if storage.where(i.ref) == "liked"]
-        picked = compose([_candidate(i, "liked") for i in local], self._context([]), 1, self._rng)
+        pool = [_candidate(i, "liked") for i in library.liked(limit=OPENER_POOL)]
+        ctx = self._context([])
+        week = replace(ctx, recent=library.recent_refs(OPENER_RECENT_HOURS))
+        picked = compose(pool, week, 1, self._rng) or compose(pool, ctx, 1, self._rng)
         return picked[0] if picked else None
 
     async def more(self, queued: list[Track], n: int = AHEAD, tag: bool = True) -> list[Track]:
@@ -308,6 +314,9 @@ class Wave:
             # Всё недавно звучало — лучше повтор, чем тишина.
             ctx.recent = {t.ref for t in queued}
             tracks = compose(pool, ctx, n, self._rng)
+        # Та же песня с Яндекса звучит лучше, чем с YouTube.
+        queued_refs = {t.ref for t in queued}
+        tracks = [t for t in await sources.upgrade(tracks) if t.ref not in ctx.banned and t.ref not in queued_refs]
         return [replace(t, origin="wave") for t in tracks]
 
     def _pick(self, queries: list[str], k: int) -> list[str]:

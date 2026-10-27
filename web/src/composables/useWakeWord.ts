@@ -77,6 +77,15 @@ export function useWakeWord(handlers: WakeHandlers) {
     if (!Recognition || !enabled.value || !wanted || rec) return
     const r = new Recognition()
     rec = r
+    // Микрофон этой сессии отпускаем ровно один раз: после «not-allowed» iOS
+    // не присылает onend — без этого аудиосессия навсегда оставалась в
+    // «звонке» (play-and-record) и вся музыка до перезагрузки играла глухо.
+    let holding = false
+    const release = (): void => {
+      if (!holding) return
+      holding = false
+      releaseMic()
+    }
     r.lang = 'ru-RU'
     r.continuous = true
     r.interimResults = true
@@ -110,11 +119,14 @@ export function useWakeWord(handlers: WakeHandlers) {
       clientLog(`wake: onerror ${e.error}`)
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         blocked.value = true
+        release()
+        listening.value = false
+        if (rec === r) rec = null
       }
     }
     r.onend = () => {
       clientLog(`wake: onend wanted=${wanted} blocked=${blocked.value}`)
-      releaseMic()
+      release()
       // iOS закрыл сессию посреди команды — дальше текст не придёт, берём что есть.
       if (alerted) finishCommand()
       listening.value = false
@@ -125,10 +137,11 @@ export function useWakeWord(handlers: WakeHandlers) {
     try {
       clientLog('wake: start()')
       takeMic()
+      holding = true
       r.start()
     } catch (e) {
       clientLog(`wake: start() threw ${e instanceof Error ? e.message : String(e)}`)
-      releaseMic()
+      release()
       rec = null
       blocked.value = true
     }

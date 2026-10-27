@@ -1,4 +1,4 @@
-"""Яндекс Музыка — основной источник: качество (MP3 320 / FLAC) и «Моя волна».
+"""Яндекс Музыка — основной источник: качество (FLAC / AAC 192) и «Моя волна».
 
 Клиент — pip `yandex-music` (неофициальный, MarshalX). api.music.yandex.net
 доступен с asus напрямую, без прокси.
@@ -404,11 +404,14 @@ async def similar(ref: str, limit: int = 20) -> list[Track]:
 
 # --- скачивание ---------------------------------------------------------------
 
-Quality = Literal["lossless", "mp3"]
+# lossless — FLAC, если Яндекс отдаст; nq — лучшее сжатое (AAC 192 ≈ MP3 256+).
+Quality = Literal["lossless", "nq"]
 # Ключи подписи get-file-info: десктопного клиента (им пользуются сторонние
-# загрузчики) и Android — из самой библиотеки. Сменит Яндекс — будет MP3 320.
+# загрузчики) и Android — из самой библиотеки. Сменит Яндекс — старый download-info.
 _FILE_INFO_KEYS = ("kzqU4XhfCaY6B6JTHODeq5", DEFAULT_SIGN_KEY)
-_LOSSLESS_CODECS = "flac,flac-mp4,aac-mp4,aac,mp3"
+# С октября 2026 на этот аккаунт и lossless, и старый download-info отдают
+# максимум 192 кбит/с; get-file-info при этом даёт AAC — он лучше MP3 того же битрейта.
+_CODECS: dict[Quality, str] = {"lossless": "flac,flac-mp4,aac-mp4,aac,mp3", "nq": "aac-mp4,aac,mp3"}
 _EXT = {"flac": ".flac", "flac-mp4": ".flac", "mp3": ".mp3", "aac": ".m4a", "aac-mp4": ".m4a", "he-aac": ".m4a", "he-aac-mp4": ".m4a"}
 
 
@@ -418,13 +421,13 @@ def _sign(key: str, params: dict[str, Any]) -> str:
     return base64.b64encode(digest).decode()[:-1]
 
 
-async def _file_info(tid: str) -> dict[str, Any]:
-    """Ссылка на lossless (или лучшее, что есть) — подписанный get-file-info."""
+async def _file_info(tid: str, quality: Quality) -> dict[str, Any]:
+    """Ссылка на файл не хуже quality (или лучшее, что есть) — подписанный get-file-info."""
     last: Exception | None = None
     for key in _FILE_INFO_KEYS:
         params: dict[str, Any] = {
-            "ts": int(time.time()), "trackId": tid, "quality": "lossless",
-            "codecs": _LOSSLESS_CODECS, "transports": "encraw",
+            "ts": int(time.time()), "trackId": tid, "quality": quality,
+            "codecs": _CODECS[quality], "transports": "encraw",
         }
         params["sign"] = _sign(key, params)
         try:
@@ -462,8 +465,8 @@ async def _remux(src: Path, dest: Path) -> None:
         raise RuntimeError(f"ffmpeg: {err.decode(errors='replace')[-200:]}")
 
 
-async def _download_lossless(tid: str, folder: Path, name: str) -> Path:
-    info = await _file_info(tid)
+async def _download_file(tid: str, folder: Path, name: str, quality: Quality) -> Path:
+    info = await _file_info(tid, quality)
     codec = info.get("codec", "")
     url = info.get("url") or (info.get("urls") or [None])[0]
     if not url or codec not in _EXT:
@@ -484,7 +487,7 @@ async def _download_lossless(tid: str, folder: Path, name: str) -> Path:
             raw.unlink(missing_ok=True)
     else:
         dest.write_bytes(data)
-    logger.info("Яндекс %s: %s, %d КБ", tid, codec, len(data) // 1024)
+    logger.info("Яндекс %s: %s %s, %d КБ", tid, codec, info.get("bitrate"), len(data) // 1024)
     return dest
 
 
@@ -500,14 +503,13 @@ async def _download_mp3(tid: str, folder: Path, name: str) -> Path:
 
 
 async def download(ref: str, folder: Path, quality: Quality) -> Path:
-    """lossless — FLAC, если Яндекс отдаст (иначе MP3 320); mp3 — сразу MP3 320."""
+    """Через get-file-info (FLAC/AAC); не вышло — MP3 из старого download-info."""
     folder.mkdir(parents=True, exist_ok=True)
     tid = track_id(ref)
-    if quality == "lossless":
-        try:
-            return await _download_lossless(tid, folder, ref)
-        except Exception as exc:
-            logger.warning("FLAC для %s не вышел (%s) — беру MP3 320", ref, exc)
+    try:
+        return await _download_file(tid, folder, ref, quality)
+    except Exception as exc:
+        logger.warning("get-file-info для %s не вышел (%s) — беру MP3", ref, exc)
     return await _download_mp3(tid, folder, ref)
 
 

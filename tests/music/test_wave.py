@@ -130,3 +130,17 @@ def test_compose_yandex_bucket_share() -> None:
         for track in compose(pool, ctx, 10, rng):
             counts["ya" if track.ref.startswith("ya") else "other"] += 1
     assert abs(counts["ya"] / sum(counts.values()) - 0.5) < 0.05
+
+
+async def test_first_rotates_over_all_likes_not_only_on_disk() -> None:
+    from app.music.library import library
+
+    for i in range(5):
+        library.upsert(yt(f"like{i}", f"artist{i}"))
+        library.rate(f"like{i}", 1)
+    # Неделю назад звучали все, кроме like3, — первым будет он (хотя на диске файлов нет).
+    for i in (0, 1, 2, 4):
+        library.start_play(yt(f"like{i}", f"artist{i}"), "web", None, "net", None, now=time.time() - 3 * 86400)
+    w = wave.Wave("web", rng=random.Random(1))
+    first = await w.first()
+    assert first is not None and first.ref == "like3"
