@@ -101,13 +101,15 @@ async def test_mix_filters_banned(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_refill_when_less_than_3_ahead(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def more(self, queued, n=8):
+    async def more(self, queued, n=8, tag=True):
         return [replace(yt(f"w{i}", f"wa{i}"), origin="wave") for i in range(n)]
 
     monkeypatch.setattr(wave.Wave, "more", more)
     player, _ = await _player("a")
     player.wave = wave.Wave(player.device)
-    await player._refill(player._generation)
+    task = player._refill()
+    assert task is not None
+    await task
     assert len(player._queue) == 1 + wave.AHEAD
 
 

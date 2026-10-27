@@ -36,6 +36,8 @@ const {
   origin: musicOrigin,
   from: musicFrom,
   meta: musicMeta,
+  searching: musicSearching,
+  notice: musicNotice,
 } = music
 
 // «Моя музыка» — экран поверх чата; всплывашка после оценки с «Отменить».
@@ -77,6 +79,12 @@ function showToast(text: string, undoRef: string | null = null): void {
   if (toastTimer !== null) clearTimeout(toastTimer)
   toastTimer = window.setTimeout(() => (toast.value = null), 4000)
 }
+
+// Плеер говорит, когда «дальше» не получилось (волна не подобрала трек).
+watch(
+  () => musicNotice.value,
+  (notice) => notice && showToast(notice.text),
+)
 
 function onLike(): void {
   const wasLiked = musicRating.value === 1
@@ -574,6 +582,7 @@ function errorText(e: unknown): string {
       :meta="musicMeta"
       :playing="musicPlaying"
       :loading="musicLoading"
+      :searching="musicSearching"
       :live="musicLive"
       :position="musicPosition"
       :duration="musicDuration"
@@ -605,6 +614,7 @@ function errorText(e: unknown): string {
       :meta="musicMeta"
       :playing="musicPlaying"
       :loading="musicLoading"
+      :searching="musicSearching"
       :live="musicLive"
       :position="musicPosition"
       :duration="musicDuration"

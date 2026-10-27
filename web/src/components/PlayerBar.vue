@@ -10,6 +10,8 @@ const props = defineProps<{
   meta: TrackMeta
   playing: boolean
   loading: boolean
+  // Следующий трек ещё подбирается — вместо исполнителя «подбираю следующий…».
+  searching: boolean
   live: boolean
   position: number
   duration: number
@@ -39,6 +41,7 @@ const color = useCoverColor(toRef(() => props.meta.cover))
 const progress = computed(() => (props.duration ? Math.min(1, props.position / props.duration) : 0))
 
 const subtitle = computed(() => {
+  if (props.searching) return 'подбираю следующий…'
   if (props.loading) return 'загрузка…'
   return [props.meta.artist, props.origin ?? (props.live ? 'эфир' : null)].filter(Boolean).join(' · ')
 })

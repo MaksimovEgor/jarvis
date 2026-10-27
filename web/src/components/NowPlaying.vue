@@ -12,6 +12,8 @@ const props = defineProps<{
   meta: TrackMeta
   playing: boolean
   loading: boolean
+  // Ядро ещё подбирает следующий трек — на обложке «Подбираю…».
+  searching: boolean
   live: boolean
   position: number
   duration: number
@@ -107,6 +109,7 @@ const swipe = useSwipe({
 <template>
   <section
     class="np"
+    :class="{ 'np--searching': searching }"
     :style="{ '--tint': color ?? 'var(--surface-2)', transform: swipe.dy.value ? `translateY(${swipe.dy.value}px)` : undefined }"
     aria-label="Сейчас играет"
     @touchstart.passive="swipe.onTouchStart"
@@ -220,7 +223,7 @@ const swipe = useSwipe({
       </div>
       <div class="np__times">
         <span>{{ clock(scrub !== null ? scrub * duration : position) }}</span>
-        <span>{{ loading ? 'загрузка…' : duration ? `−${clock(duration - position)}` : '' }}</span>
+        <span>{{ searching ? 'подбираю…' : loading ? 'загрузка…' : duration ? `−${clock(duration - position)}` : '' }}</span>
       </div>
     </template>
 
@@ -365,6 +368,11 @@ const swipe = useSwipe({
     &--drag {
       transition: none;
     }
+  }
+
+  // Следующий трек подбирается: пустая обложка дышит, а не выглядит сломанной.
+  &--searching &__cover {
+    animation: np-pulse 1.4s ease-in-out infinite;
   }
 
   &__meta {
@@ -681,6 +689,17 @@ const swipe = useSwipe({
     small {
       color: #8a96a3;
     }
+  }
+}
+
+@keyframes np-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+
+  50% {
+    opacity: 0.8;
   }
 }
 </style>

@@ -138,8 +138,11 @@ export function playerEventsUrl(since: string): string {
   return `player/events?${query}`
 }
 
-export async function playerControl(action: PlayerAction, position?: number): Promise<void> {
-  await postJson('player/control', { device: DEVICE_ID, action, position })
+// text — что ответило ядро («Дальше в очереди ничего нет»), экран покажет его,
+// если переключение не случилось.
+export async function playerControl(action: PlayerAction, position?: number): Promise<string | null> {
+  const data = (await postJson('player/control', { device: DEVICE_ID, action, position })) as { text?: string } | null
+  return data?.text ?? null
 }
 
 export type RateValue = 'like' | 'dislike' | 'none'
@@ -254,7 +257,7 @@ export async function playerReport(report: PlayerReport): Promise<void> {
   }
 }
 
-async function postJson(url: string, body: unknown): Promise<void> {
+async function postJson(url: string, body: unknown): Promise<unknown> {
   const resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -265,6 +268,7 @@ async function postJson(url: string, body: unknown): Promise<void> {
   if (!resp.ok) {
     throw new Error(`Сервер ответил ${resp.status}`)
   }
+  return resp.json().catch(() => null)
 }
 
 async function accepted(resp: Response): Promise<void> {

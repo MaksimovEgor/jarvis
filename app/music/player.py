@@ -59,6 +59,9 @@ ARTIST_BAN_DISLIKES = 2
 # Песни не по волне: впереди меньше стольких — досыпать похожих на текущую.
 # Раньше микс кончался (~20 треков), и музыка молча замолкала.
 MIX_REFILL_BELOW = 2
+# «Дальше» у края волны ждёт подбора не дольше: лучше честный откат экрана,
+# чем кнопка, которая висит полминуты.
+REFILL_WAIT = 15.0
 # Нашли, но ни один из кандидатов не загрузился (YouTube не отдал, сеть).
 # Ответ, а не исключение: иначе быстрый путь отдавал реплику агенту, и тот
 # искал то же самое ещё раз.
@@ -129,7 +132,9 @@ class Player:
         self._duck_guard: asyncio.Task[None] | None = None
         self._autosave: asyncio.Task[None] | None = None
         self.wave: Wave | None = None
-        self._refilling = False
+        # Идущий подбор волны: один на плеер. «Дальше» у края очереди ждёт
+        # именно его, а не запускает второй.
+        self._refill_task: asyncio.Task[None] | None = None
         self._mixing = False
         self._play_id: int | None = None
 
@@ -216,6 +221,10 @@ class Player:
                 where = storage.where(track.ref)
             elif track.source == "youtube":
                 where = "stream"  # длинное с YouTube — потоком
+            # Волна подбирает следующие, пока этот трек качается: к первому
+            # звуку «дальше» уже есть, и кнопка не упирается в пустую очередь.
+            if self.wave is not None:
+                self._refill()
             started = time.monotonic()
             try:
                 if track.origin == "wave" and where == "net":
@@ -243,9 +252,7 @@ class Player:
                 asyncio.create_task(self._publish_audio_info(track))
             if i + 1 < len(self._queue):
                 self.output.prefetch(self._queue[i + 1])
-            if self.wave is not None:
-                asyncio.create_task(self._refill(self._generation))
-            elif _journaled(track) and len(self._queue) - i - 1 < MIX_REFILL_BELOW:
+            if self.wave is None and _journaled(track) and len(self._queue) - i - 1 < MIX_REFILL_BELOW:
                 asyncio.create_task(self._extend_with_mix(track, self._generation))
             logger.info("%s играет: %s", self.device, track.title)
             return track
@@ -308,26 +315,46 @@ class Player:
                 self.output.prefetch(self._queue[self._pos + 1])
             self._publish_upcoming()
 
-    async def _refill(self, generation: int) -> None:
-        """Волна: впереди меньше REFILL_BELOW — досыпать AHEAD треков."""
+    def _refill(self) -> asyncio.Task[None] | None:
+        """Волна: впереди меньше REFILL_BELOW — досыпать в фоне.
+        Задачу отдаём наружу: «дальше» у последнего трека ждёт этот же подбор,
+        а не отвечает «волна не успела» и не запускает второй."""
         wave = self.wave
-        if wave is None or self._refilling or len(self._queue) - self._pos - 1 >= REFILL_BELOW:
-            return
-        self._refilling = True
+        if wave is None or len(self._queue) - self._pos - 1 >= REFILL_BELOW:
+            return None
+        if self._refill_task is None or self._refill_task.done():
+            self._start_fill(wave)
+        return self._refill_task
+
+    def _start_fill(
+        self, wave: Wave, queued: list[Track] | None = None, n: int = AHEAD, tag: bool = True,
+    ) -> asyncio.Task[None]:
+        """Запустить подбор волны в фоне (queued — от чего строить похожее)."""
+        task = asyncio.create_task(self._fill(wave, queued, n, tag))
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        self._refill_task = task
+        return task
+
+    async def _fill(
+        self, wave: Wave, queued: list[Track] | None = None, n: int = AHEAD, tag: bool = True,
+    ) -> None:
+        context = queued if queued is not None else self._queue[max(0, self._pos - 20):]
         try:
-            tracks = await wave.more(self._queue[max(0, self._pos - 20):], AHEAD)
+            tracks = await wave.more(context, n, tag=tag)
         except Exception:
             logger.exception("Волна не досыпала треки")
             return
-        finally:
-            self._refilling = False
         async with self._lock:
-            if generation != self._generation or self.wave is not wave:
+            # Волну сменили (стоп, другой запрос) — эта пачка уже не нужна.
+            if self.wave is not wave:
                 return
-            was_last = self._pos == len(self._queue) - 1
-            queued = {t.ref for t in self._queue}
-            self._queue.extend(t for t in tracks if t.ref not in queued)
-            if was_last and self._pos + 1 < len(self._queue):
+            known = {t.ref for t in self._queue}
+            fresh = [t for t in tracks if t.ref not in known]
+            if not fresh:
+                return
+            self._queue.extend(fresh)
+            # Файл следующего — заранее: по «дальше» он заиграет без сети.
+            if 0 <= self._pos + 1 < len(self._queue):
                 self.output.prefetch(self._queue[self._pos + 1])
             self._publish_upcoming()
 
@@ -384,6 +411,13 @@ class Player:
         taste.refresh_seeds_soon(wave.slot, wave.mood)
         async with self._lock:
             first = await wave.first()
+            if first is not None:
+                # Пока качается первый трек, волна уже подбирает следующие: к
+                # первому звуку «дальше» есть, и свайп не ждёт подбора.
+                # Первую пачку — без разметки энергии (она ждёт LLM секунды):
+                # следующие пачки подберутся с разметкой, пока играют эти.
+                self.wave = wave
+                self._start_fill(wave, [first], n=REFILL_BELOW, tag=False)
             tracks = [first] if first else await wave.more([], REFILL_BELOW, tag=False)
             if not tracks:
                 return "Не получилось собрать волну: нет ни интернета, ни сохранённой музыки."
@@ -646,8 +680,14 @@ class Player:
 
     async def next(self) -> str:
         if self.wave is not None and self._pos + 1 >= len(self._queue):
-            # Волна не успела досыпать — подождём её здесь.
-            await self._refill(self._generation)
+            # Волна не успела досыпать — ждём этот же подбор, а не отвечаем
+            # «не успела»: экран уже показал «подбираю…» и получит трек снимком.
+            task = self._refill()
+            if task is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), REFILL_WAIT)
+                except Exception:
+                    logger.warning("Волна не подобрала «дальше» за %.0f с", REFILL_WAIT)
         async with self._lock:
             if self._pos + 1 >= len(self._queue):
                 if self.wave is not None:

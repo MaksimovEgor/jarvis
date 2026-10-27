@@ -26,6 +26,11 @@ const START_MS = 6_000
 // Переключение показано сразу, до ответа ядра. Ядро ответило, а новый трек
 // за столько не пришёл — значит, не переключилось («дальше ничего нет»): откат.
 const CONFIRM_MS = 2_000
+// Следующего ещё нет (волна подбирает): столько ждём его, потом откат.
+// Чуть больше, чем ждёт ядро (player.REFILL_WAIT), — запрос ответит раньше.
+const PICK_WAIT_MS = 17_000
+// Что на экране, пока следующий трек ещё подбирается.
+const PICKING = 'Подбираю…'
 
 type Neighbor = UpcomingTrack & { src: string | null }
 
@@ -40,6 +45,10 @@ interface Pending {
   audioChanged: boolean
   position: number
   timer: number | null
+  // Ядро ещё не знает, что играть следующим, — экран показывает «Подбираю…».
+  unknown: boolean
+  // Что ответило ядро: покажем, если переключение так и не случилось.
+  answer: string | null
 }
 
 // Громкость <audio> на iPhone не меняется (только кнопками) — сообщаем ядру,
@@ -76,6 +85,10 @@ export function useMusic(
   const meta = ref<TrackMeta | null>(null)
   // «Джарвис, покажи текст» — ядро просит экран открыть текст/очередь.
   const uiRequest = ref<{ open: 'lyrics' | 'queue'; at: number } | null>(null)
+  // Следующий трек ещё подбирается: экран уже ушёл вперёд, трека пока нет.
+  const searching = ref(false)
+  // Короткое сообщение наверх (App показывает тостом).
+  const notice = ref<{ text: string; at: number } | null>(null)
 
   const audio = new Audio()
   audio.preload = 'auto'
@@ -207,7 +220,14 @@ export function useMusic(
     lastState = state
     if (pending) {
       // Снимки старого трека и промежуточных «дальше» — экран уже впереди.
-      if (state.seq < pending.target) return
+      if (state.seq < pending.target) {
+        // Волна досыпала треки: в «Подбираю…» уже можно показать, что дальше.
+        if (pending.unknown && meta.value) {
+          meta.value = { ...meta.value, upcoming: state.upcoming ?? [] }
+        }
+        preloadNext(state)
+        return
+      }
       const adopt = pending.src !== null && state.src === pending.src
       settle()
       if (adopt) {
@@ -257,9 +277,14 @@ export function useMusic(
   function jump(to: Neighbor, upcoming: UpcomingTrack[]): void {
     const was = meta.value
     if (!pending) {
-      pending = { base: seq, target: seq, src: null, audioChanged: false, position: audio.currentTime || 0, timer: null }
+      pending = {
+        base: seq, target: seq, src: null, audioChanged: false,
+        position: audio.currentTime || 0, timer: null, unknown: false, answer: null,
+      }
     }
     pending.target += 1
+    pending.unknown = false
+    searching.value = false
     title.value = to.song
     trackRef.value = trackRef.value !== null ? to.ref : null
     rating.value = null
@@ -291,15 +316,55 @@ export function useMusic(
     updateSession()
   }
 
+  // Следующего ещё нет (волна подбирает) — всё равно реагируем сразу: карточка
+  // улетает, на её месте «Подбираю…». Трек придёт снимком ядра; не придёт —
+  // откат и сообщение.
+  function askNext(): void {
+    if (!pending) {
+      pending = {
+        base: seq, target: seq, src: null, audioChanged: false,
+        position: audio.currentTime || 0, timer: null, unknown: true, answer: null,
+      }
+    }
+    pending.target += 1
+    pending.unknown = true
+    searching.value = true
+    title.value = PICKING
+    trackRef.value = null
+    rating.value = null
+    from.value = null
+    position.value = 0
+    duration.value = 0
+    meta.value = {
+      song: PICKING,
+      artist: null,
+      cover: null,
+      coverCrop: true,
+      service: null,
+      quality: null,
+      note: null,
+      upcoming: [],
+    }
+    isLoading.value = true
+    wantPlaying.value = true
+    pauseSelf()
+    updateSession()
+  }
+
   function settle(): void {
     if (pending?.timer) clearTimeout(pending.timer)
     pending = null
+    searching.value = false
   }
 
   // Ядро не переключило (или запрос упал) — вернуть то, что оно считает текущим.
-  function revert(): void {
+  // failed=false — экран откатываем сами («назад» во время подбора): не пугать.
+  function revert(failed = true): void {
     const was = pending
     if (!was || !lastState) return settle()
+    if (failed && was.unknown) {
+      notice.value = { text: was.answer ?? 'Не получилось подобрать следующий трек', at: Date.now() }
+    }
     settle()
     if (was.audioChanged) {
       seq = -1 // заставить onState перезагрузить звук
@@ -317,10 +382,17 @@ export function useMusic(
   }
 
   // Ждём снимок ядра: запрос упал — откат сразу, ответ пришёл — ещё CONFIRM_MS.
-  function confirm(request: Promise<unknown>): void {
+  // guard — страховка на время подбора: экран уже ушёл вперёд, и без ответа
+  // он бы висел в «Подбираю…» сколько угодно.
+  function confirm(request: Promise<string | null>, guard = 0): void {
+    if (guard > 0 && pending) {
+      if (pending.timer) clearTimeout(pending.timer)
+      pending.timer = window.setTimeout(revert, guard)
+    }
     request.then(
-      () => {
+      (answer) => {
         if (!pending) return
+        pending.answer = answer
         if (pending.timer) clearTimeout(pending.timer)
         pending.timer = window.setTimeout(revert, CONFIRM_MS)
       },
@@ -597,11 +669,23 @@ export function useMusic(
 
   function next(): void {
     const upcoming = meta.value?.upcoming ?? []
-    if (upcoming[0]) jump({ ...upcoming[0], src: readySrc(upcoming[0].ref) }, upcoming.slice(1))
-    confirm(playerControl('next'))
+    if (upcoming[0]) {
+      jump({ ...upcoming[0], src: readySrc(upcoming[0].ref) }, upcoming.slice(1))
+      confirm(playerControl('next'))
+      return
+    }
+    if (!hasTrack.value) {
+      confirm(playerControl('next'))
+      return
+    }
+    // Следующего ещё нет (волна подбирает) — не молчим: «Подбираю…» сразу.
+    askNext()
+    confirm(playerControl('next'), PICK_WAIT_MS)
   }
 
   function previous(): void {
+    // «Подбираю…» отменяем: на экран возвращается то, что действительно играет.
+    if (pending?.unknown) revert(false)
     const prev = lastState?.prev
     const now = current()
     if (pending) pending.target += 1 // после «дальше» назад — просто ждём ядро
@@ -630,7 +714,7 @@ export function useMusic(
     const upcoming = meta.value?.upcoming ?? []
     if (!pending && upcoming[0]) {
       jump({ ...upcoming[0], src: readySrc(upcoming[0].ref) }, upcoming.slice(1))
-      confirm(rateTrack('dislike', ref))
+      confirm(rateTrack('dislike', ref).then((answer) => answer.text))
     } else {
       void rateTrack('dislike', ref).catch(() => (rating.value = null))
     }
@@ -681,6 +765,8 @@ export function useMusic(
     from,
     meta,
     uiRequest,
+    searching,
+    notice,
     blocked,
     like,
     dislike,
